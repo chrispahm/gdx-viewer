@@ -1,9 +1,13 @@
 {
   "name": "gdx-viewer",
   "main": "./lib/gdx-viewer",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Display GAMS GDX files",
-  "keywords": ["GAMS","gdx","AML"],
+  "keywords": [
+    "GAMS",
+    "gdx",
+    "AML"
+  ],
   "repository": "https://github.com/chrispahm/gdx-viewer",
   "deserializers": {
     "gdx-viewer/GDXViewerView": "deserializeGDXViewerView"
