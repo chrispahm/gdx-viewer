@@ -1,0 +1,26 @@
+{
+  "context-menu": {
+    "atom-text-editor": [
+      {
+        "label": "Toggle gdx-viewer",
+        "command": "gdx-viewer:toggle"
+      }
+    ]
+  },
+  "menu": [
+    {
+      "label": "Packages",
+      "submenu": [
+        {
+          "label": "gdx-viewer",
+          "submenu": [
+            {
+              "label": "Toggle",
+              "command": "gdx-viewer:toggle"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
