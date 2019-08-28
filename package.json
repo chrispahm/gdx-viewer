@@ -8,7 +8,6 @@
   "deserializers": {
     "gdx-viewer/GDXViewerView": "deserializeGDXViewerView"
   },
-  "repository": "https://github.com/atom/gdx-viewer",
   "license": "MIT",
   "engines": {
     "atom": ">=1.0.0 <2.0.0"
