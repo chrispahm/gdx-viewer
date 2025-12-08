@@ -1,11 +1,8 @@
 import * as http from 'node:http';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger } from '@duckdb/duckdb-wasm';
-// Use web-worker@1.2.0 package which provides Web Worker API for Node.js
-// This is the same package duckdb-wasm uses internally
-import Worker from 'web-worker';
 
 export interface CancellationToken {
   isCancellationRequested: boolean;
@@ -69,25 +66,86 @@ export class DuckdbService {
       });
     });
 
-    // Initialize DuckDB-WASM with Node.js worker using web-worker package
+    // Initialize DuckDB-WASM with native worker_threads (polyfilled to Web Worker API)
     const nodeModulesPath = path.join(this.extensionPath, 'node_modules', '@duckdb', 'duckdb-wasm', 'dist');
     const workerPath = path.join(nodeModulesPath, 'duckdb-node-eh.worker.cjs');
     const wasmPath = path.join(nodeModulesPath, 'duckdb-eh.wasm');
 
-    // Use web-worker package which provides Web Worker API for Node.js
-    // Must use file:// URL format
-    const workerUrl = pathToFileURL(workerPath).href;
-    const worker = new Worker(workerUrl);
-    
-    this.db = new AsyncDuckDB(new ConsoleLogger(), worker);
+    // Write a small wrapper to polyfill the Web Worker API expected by duckdb-wasm
+    const wrapperContent = `
+const { parentPort } = require('worker_threads');
+global.self = global;
+global.postMessage = (msg) => parentPort.postMessage(msg);
+
+global.addEventListener = (type, handler) => {
+  if (type === 'message') {
+    parentPort.on('message', (msg) => handler({ data: msg }));
+  }
+};
+
+Object.defineProperty(global, 'onmessage', {
+  set: (handler) => {
+    parentPort.on('message', (msg) => handler && handler({ data: msg }));
+  },
+  get: () => null,
+});
+
+require('${workerPath.replace(/\\/g, '\\\\')}');
+`;
+
+    const wrapperPath = path.join(this.extensionPath, 'dist', 'duckdb-worker-wrapper.js');
+    await fs.writeFile(wrapperPath, wrapperContent);
+
+    const nodeWorker = new Worker(wrapperPath, { execArgv: [] });
+
+    // Adapt worker_threads Worker to Web Worker interface expected by AsyncDuckDB
+    const listeners = new Map<any, any>();
+    const worker = {
+      postMessage: (message: any, transfer?: any[]) => nodeWorker.postMessage(message, transfer as any),
+      onmessage: null as any,
+      terminate: () => nodeWorker.terminate(),
+      addEventListener: (type: string, listener: any) => {
+        if (type !== 'message') {
+          return;
+        }
+        const wrapped = (data: any) => listener({ data });
+        listeners.set(listener, wrapped);
+        nodeWorker.on('message', wrapped);
+      },
+      removeEventListener: (type: string, listener: any) => {
+        if (type !== 'message') {
+          return;
+        }
+        const wrapped = listeners.get(listener);
+        if (wrapped) {
+          nodeWorker.off('message', wrapped);
+          listeners.delete(listener);
+        }
+      },
+    };
+
+    nodeWorker.on('message', (data) => {
+      if (worker.onmessage) {
+        // @ts-ignore
+        worker.onmessage({ data });
+      }
+    });
+
+    nodeWorker.on('error', (err) => {
+      console.error('[DuckDB] Worker error:', err);
+    });
+
+    this.db = new AsyncDuckDB(new ConsoleLogger(), worker as any);
     await this.db.instantiate(wasmPath);
     await this.db.open({ allowUnsignedExtensions: true });
 
     // Create a persistent connection for all queries
     this.conn = await this.db.connect();
-
+    // Enable Excel export (requires excel extension)
+    await this.conn.query('INSTALL excel');
+    await this.conn.query('LOAD excel');
     // Load the GDX extension
-    await this.conn.query(`SET custom_extension_repository = 'http://localhost:${this.port}'`);
+    await this.conn.query(`SET custom_extension_repository = 'http://127.0.0.1:${this.port}'`);
     await this.conn.query('LOAD duckdb_gdx');
   }
 
@@ -178,6 +236,17 @@ export class DuckdbService {
       rows,
       rowCount: rows.length,
     };
+  }
+
+  async exportQuery(sql: string, format: 'csv' | 'parquet' | 'excel', destinationPath: string): Promise<void> {
+    if (!this.conn) {
+      throw new Error('DuckDB not initialized');
+    }
+
+    const normalizedFormat = format === 'excel' ? 'xlsx' : format;
+    const escapedPath = destinationPath.replace(/'/g, "''");
+    const copySql = `COPY (${sql}) TO '${escapedPath}' (FORMAT '${normalizedFormat}')`;
+    await this.conn.query(copySql);
   }
 
   private hashString(str: string): string {
