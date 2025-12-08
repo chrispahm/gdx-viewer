@@ -1,0 +1,100 @@
+{
+  "name": "gdx-viewer",
+  "displayName": "GDX Viewer",
+  "description": "View GAMS Data eXchange Files in VSCode",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.106.1"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCustomEditor:gdxViewer.gdxEditor"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "gdxViewer.gdxEditor",
+        "displayName": "GDX Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.gdx"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "viewsContainers": {
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "gdxSymbols",
+          "name": "GDX Symbols",
+          "when": "gdxViewer.hasActiveDocument"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GDX Viewer",
+      "properties": {
+        "gdxViewer.autoLoadFilters": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically load filter values when opening a GDX file"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "gdxViewer.selectSymbol",
+        "title": "Select Symbol"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "^1.29.0",
+    "@radix-ui/react-slot": "^1.1.0",
+    "@tanstack/react-table": "^8.20.5",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.5.4",
+    "web-worker": "^1.5.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/vscode": "^1.106.1",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "autoprefixer": "^10.4.20",
+    "esbuild": "^0.27.1",
+    "eslint": "^9.39.1",
+    "npm-run-all": "^4.1.5",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
+  }
+}

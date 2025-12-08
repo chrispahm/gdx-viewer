@@ -1,0 +1,235 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Use VSCode theme variables directly */
+:root {
+  --radius: 0.25rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  }
+
+  body {
+    background-color: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    font-weight: var(--vscode-font-weight);
+    margin: 0;
+    padding: 0;
+  }
+}
+
+/* Component styles using VSCode variables */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  border-radius: var(--radius);
+  font-size: var(--vscode-font-size);
+  font-weight: 500;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+  outline: none;
+}
+
+.btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.btn:disabled {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.btn-primary {
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.btn-primary:hover {
+  background-color: var(--vscode-button-hoverBackground);
+}
+
+.btn-secondary {
+  background-color: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.btn-secondary:hover {
+  background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.btn-ghost {
+  background-color: transparent;
+  color: var(--vscode-foreground);
+  border: none;
+}
+
+.btn-ghost:hover {
+  background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Input styles */
+.input {
+  display: flex;
+  height: 2rem;
+  width: 100%;
+  border-radius: var(--radius);
+  background-color: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  padding: 0.25rem 0.75rem;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+}
+
+.input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+
+.input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Table styles */
+.table-container {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border, transparent);
+  border-radius: var(--radius);
+}
+
+table {
+  width: 100%;
+  caption-side: bottom;
+  font-size: var(--vscode-font-size);
+  border-collapse: collapse;
+}
+
+thead {
+  background-color: var(--vscode-editorWidget-background);
+}
+
+thead tr {
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+th {
+  height: 2.5rem;
+  padding: 0 1rem;
+  text-align: left;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+}
+
+tbody tr {
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  transition: background-color 0.15s;
+}
+
+tbody tr:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+td {
+  padding: 0.75rem 1rem;
+  vertical-align: middle;
+}
+
+/* Toolbar styles */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: var(--vscode-editorWidget-background);
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+/* SQL panel styles */
+.sql-panel {
+  background-color: var(--vscode-editorWidget-background);
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  padding: 0.75rem 1rem;
+}
+
+.sql-input {
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.5rem;
+  background-color: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: var(--radius);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  resize: vertical;
+}
+
+.sql-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+
+/* Error display */
+.error-message {
+  padding: 0.5rem 1rem;
+  background-color: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-inputValidation-errorForeground);
+  border-bottom: 1px solid var(--vscode-inputValidation-errorBorder);
+}
+
+/* Loading overlay */
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--vscode-editor-background);
+  opacity: 0.9;
+}
+
+/* Muted text */
+.text-muted {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Pagination styles */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--vscode-panel-border, transparent);
+  background-color: var(--vscode-editorWidget-background);
+}
+
+.pagination select {
+  background-color: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, transparent));
+  border-radius: var(--radius);
+  padding: 0.25rem 0.5rem;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+.pagination select:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
