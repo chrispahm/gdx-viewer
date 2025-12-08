@@ -1,71 +1,46 @@
-# gdx-viewer README
+# GDX Viewer
 
-This is the README for your extension "gdx-viewer". After writing up a brief description, we recommend including the following sections.
+VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB + the `duckdb_gdx` extension to read symbols, preview data, run ad-hoc SQL, and export results.
 
 ## Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+- Open `.gdx` files in a custom editor with an interactive data grid.
+- Symbols tree: browse symbols, see dimensions and record counts.
+- One-click paging: quickly page through symbol data (`LIMIT/OFFSET`).
+- SQL panel: expand to run arbitrary queries against the currently opened GDX (uses `read_gdx`).
+- Display attributes: control numeric formatting (precision, format, squeeze defaults/zeros).
+- Export menu: export the current query result to CSV, Excel (`xlsx`), or Parquet via DuckDB `COPY`.
+- Automatic filter preloading is supported via background domain loading.
 
 ## Requirements
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+- VS Code 1.106.1 or newer.
+- The bundled DuckDB-WASM `duckdb_gdx` extension is served locally by the extension; no external services required.
+
+## Usage
+
+1. Open a `.gdx` file in VS Code; the GDX Viewer custom editor will appear.
+2. Select a symbol from the Symbols view; the first page (100 rows) is shown automatically.
+3. Use paging controls in the grid to move through the data.
+4. Open the SQL panel to run custom queries (Ctrl/Cmd+Enter to run). The placeholder `__GDX_FILE__` is automatically replaced.
+5. Use the Attributes button to adjust formatting.
+6. Use Export → CSV/Excel/Parquet to write the current query to disk. The extension installs/loads DuckDB’s `excel` extension automatically for XLSX output.
 
 ## Extension Settings
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+- `gdxViewer.autoLoadFilters` (boolean, default: true) — Automatically load filter/domain values for the selected symbol in the background.
 
-For example:
+## Development
 
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+- Install dependencies: `npm install`
+- Build: `npm run compile`
+- Watch build: `npm run watch`
+- Run tests: `npm test` (compiles tests and launches VS Code test runner)
 
 ## Known Issues
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+- Large GDX files may still be slow to scan depending on environment; paging and filter loading run lazily to reduce perceived latency.
 
-## Release Notes
+## License
 
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+MIT

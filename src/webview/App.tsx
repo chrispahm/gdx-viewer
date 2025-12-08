@@ -48,6 +48,7 @@ export function App() {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isFilterLoading, setIsFilterLoading] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(100);
@@ -113,6 +114,22 @@ export function App() {
     [selectedSymbol, executeQuery]
   );
 
+  const handleExport = useCallback(
+    async (format: 'csv' | 'parquet' | 'excel') => {
+      if (!query) return;
+      setIsExporting(true);
+      setError(null);
+      try {
+        await sendRequest('exportData', { format, query });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Export failed');
+      } finally {
+        setIsExporting(false);
+      }
+    },
+    [query]
+  );
+
   const handleCancelFilterLoading = useCallback(() => {
     vscode.postMessage({ type: "cancelFilterLoading" });
   }, []);
@@ -176,6 +193,20 @@ export function App() {
           }
           break;
 
+        case "exportResult":
+          if (pendingRequests.has(message.requestId)) {
+            pendingRequests.get(message.requestId)!.resolve(message.path);
+            pendingRequests.delete(message.requestId);
+          }
+          break;
+
+        case "exportError":
+          if (pendingRequests.has(message.requestId)) {
+            pendingRequests.get(message.requestId)!.reject(new Error(message.error));
+            pendingRequests.delete(message.requestId);
+          }
+          break;
+
         case "filterLoadingChanged":
           setIsFilterLoading(message.isLoading);
           break;
@@ -203,6 +234,8 @@ export function App() {
         isLoading={isLoading}
         displayAttributes={displayAttributes}
         onAttributesChange={setDisplayAttributes}
+        onExport={handleExport}
+        isExporting={isExporting}
       />
 
       {error && (

@@ -7,6 +7,8 @@ interface SqlToolbarProps {
   isLoading: boolean;
   displayAttributes: DisplayAttributes;
   onAttributesChange: (attributes: DisplayAttributes) => void;
+  onExport: (format: 'csv' | 'parquet' | 'excel', query: string) => void;
+  isExporting?: boolean;
 }
 
 export function SqlToolbar({ 
@@ -15,9 +17,12 @@ export function SqlToolbar({
   isLoading,
   displayAttributes,
   onAttributesChange,
+  onExport,
+  isExporting = false,
 }: SqlToolbarProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [query, setQuery] = useState(defaultQuery);
+  const [isExportOpen, setIsExportOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Update local query when defaultQuery changes
@@ -67,6 +72,95 @@ export function SqlToolbar({
           attributes={displayAttributes}
           onChange={onAttributesChange}
         />
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={() => setIsExportOpen(!isExportOpen)}
+            disabled={isLoading || isExporting}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '4px 8px',
+              backgroundColor: isExportOpen
+                ? 'var(--vscode-button-background)'
+                : 'transparent',
+              color: isExportOpen
+                ? 'var(--vscode-button-foreground)'
+                : 'var(--vscode-foreground)',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: isLoading || isExporting ? 'not-allowed' : 'pointer',
+              fontFamily: 'var(--vscode-font-family)',
+              fontSize: 'var(--vscode-font-size)',
+              fontWeight: 600,
+              opacity: isLoading || isExporting ? 0.5 : 1,
+              transition: 'background-color 0.15s'
+            }}
+            onMouseEnter={(e) => {
+              if (!isExportOpen && !isLoading && !isExporting) {
+                e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isExportOpen) {
+                e.currentTarget.style.backgroundColor = 'transparent';
+              }
+            }}
+            title="Export data"
+          >
+            Export
+          </button>
+
+          {isExportOpen && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',
+              right: 0,
+              marginTop: '4px',
+              backgroundColor: 'var(--vscode-dropdown-background)',
+              border: '1px solid var(--vscode-dropdown-border, var(--vscode-panel-border))',
+              borderRadius: '3px',
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+              minWidth: '180px',
+              zIndex: 20,
+              overflow: 'hidden'
+            }}>
+              {[
+                { label: 'Export to CSV', value: 'csv' },
+                { label: 'Export to Excel', value: 'excel' },
+                { label: 'Export to Parquet', value: 'parquet' },
+              ].map(option => (
+                <button
+                  key={option.value}
+                  onClick={() => {
+                    setIsExportOpen(false);
+                    onExport(option.value as 'csv' | 'excel' | 'parquet', query);
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '8px 12px',
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--vscode-foreground)',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--vscode-font-family)',
+                    fontSize: 'var(--vscode-font-size)'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = 'var(--vscode-list-hoverBackground)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
+                  disabled={isLoading || isExporting}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           onClick={() => setIsExpanded(!isExpanded)}
           disabled={isLoading}

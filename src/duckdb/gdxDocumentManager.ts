@@ -207,6 +207,22 @@ export class GdxDocumentManager {
     return this.duckdbService.executeQuery(actualSql);
   }
 
+  async exportQuery(
+    uri: vscode.Uri,
+    sql: string,
+    format: 'csv' | 'parquet' | 'excel',
+    destinationPath: string
+  ): Promise<void> {
+    const state = this.documents.get(uri.toString());
+    if (!state) {
+      throw new Error('Document not open');
+    }
+
+    const actualSql = sql.replace(/__GDX_FILE__/g, state.registrationName);
+    console.log('[GDX Document Manager] Exporting query:', actualSql, '->', destinationPath);
+    await this.duckdbService.exportQuery(actualSql, format, destinationPath);
+  }
+
   dispose(): void {
     // Cancel all pending operations and close all documents
     for (const state of this.documents.values()) {

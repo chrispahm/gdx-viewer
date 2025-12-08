@@ -144,6 +144,47 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
           // Start loading filters for this symbol
           this.documentManager.startFilterLoading(uri, message.symbol.name);
           break;
+
+        case 'exportData': {
+          try {
+            const format = message.format as 'csv' | 'parquet' | 'excel';
+            const extension = format === 'excel' ? 'xlsx' : format;
+            const suggested = uri.with({ path: uri.path.replace(/\.gdx$/i, `.${extension}`) });
+
+            const target = await vscode.window.showSaveDialog({
+              defaultUri: suggested,
+              filters: {
+                CSV: ['csv'],
+                Excel: ['xlsx'],
+                Parquet: ['parquet'],
+              },
+            });
+
+            if (!target) {
+              webviewPanel.webview.postMessage({
+                type: 'exportError',
+                requestId: message.requestId,
+                error: 'Export cancelled',
+              });
+              break;
+            }
+
+            await this.documentManager.exportQuery(uri, message.query, format, target.fsPath);
+            webviewPanel.webview.postMessage({
+              type: 'exportResult',
+              requestId: message.requestId,
+              path: target.fsPath,
+            });
+            vscode.window.showInformationMessage(`Exported to ${target.fsPath}`);
+          } catch (error) {
+            webviewPanel.webview.postMessage({
+              type: 'exportError',
+              requestId: message.requestId,
+              error: error instanceof Error ? error.message : 'Unknown error',
+            });
+          }
+          break;
+        }
       }
     });
 
