@@ -1,6 +1,6 @@
 # GDX Viewer
 
-VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB + the `duckdb_gdx` extension to read symbols, preview data, run ad-hoc SQL, and export results.
+VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB-WASM + the `duckdb_gdx` extension to read symbols, preview data, run ad-hoc SQL, and export results.
 
 <img width="1024" height="864" alt="Image" src="https://github.com/user-attachments/assets/8ac79840-bdd8-4fa3-a47b-ccc586da8a11" />
 
@@ -17,7 +17,6 @@ VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB + the `duc
 ## Requirements
 
 - VS Code 1.106.1 or newer.
-- The bundled DuckDB-WASM `duckdb_gdx` extension is served locally by the extension; no external services required.
 
 ## Usage
 
