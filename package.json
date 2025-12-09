@@ -2,6 +2,7 @@
   "name": "gdx-viewer",
   "displayName": "GDX Viewer",
   "description": "View GAMS Data eXchange Files in VSCode",
+  "publisher": "ChristophPahmeyer",
   "repository": {
     "type": "git",
     "url": "https://github.com/chrispahm/gdx-viewer"
