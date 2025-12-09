@@ -218,7 +218,10 @@ export class GdxDocumentManager {
       throw new Error('Document not open');
     }
 
-    const actualSql = sql.replace(/__GDX_FILE__/g, state.registrationName);
+    let actualSql = sql.replace(/__GDX_FILE__/g, state.registrationName);
+    // also remove any LIMIT/OFFSET clauses for export
+    actualSql = actualSql.replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?/gi, '');
+    console.log('[GDX Document Manager] Exporting query after removing LIMIT/OFFSET:', actualSql);
     console.log('[GDX Document Manager] Exporting query:', actualSql, '->', destinationPath);
     await this.duckdbService.exportQuery(actualSql, format, destinationPath);
   }
