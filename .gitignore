@@ -4,3 +4,5 @@ node_modules
 .vscode-test/
 *.vsix
 .DS_Store
+FAO_trade_matrix_1986_2021.gdx
+FAO_trade_matrix_1986_2021.gsp
