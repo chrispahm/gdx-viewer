@@ -50,21 +50,49 @@ function copyWasmFiles() {
 	console.log('[build] Copied WASM files');
 }
 
-// Copy DuckDB runtime files needed at runtime (worker + wasm)
-function copyDuckdbRuntime() {
+// Copy DuckDB WASM payload used by the bundled worker
+function copyDuckdbWasm() {
 	const runtimeSrcDir = path.join(__dirname, 'node_modules', '@duckdb', 'duckdb-wasm', 'dist');
 	const runtimeDestDir = path.join(__dirname, 'dist', 'duckdb');
 
 	fs.mkdirSync(runtimeDestDir, { recursive: true });
 
-	for (const file of ['duckdb-node-eh.worker.cjs', 'duckdb-eh.wasm']) {
-		fs.copyFileSync(
-			path.join(runtimeSrcDir, file),
-			path.join(runtimeDestDir, file)
-		);
-	}
+	fs.copyFileSync(
+		path.join(runtimeSrcDir, 'duckdb-eh.wasm'),
+		path.join(runtimeDestDir, 'duckdb-eh.wasm')
+	);
 
-	console.log('[build] Copied DuckDB runtime');
+	console.log('[build] Copied DuckDB wasm');
+}
+
+// Bundle the DuckDB node worker (and its JS deps) to avoid shipping node_modules
+async function bundleDuckdbWorker() {
+	const runtimeSrcDir = path.join(__dirname, 'node_modules', '@duckdb', 'duckdb-wasm', 'dist');
+	const entry = path.join(runtimeSrcDir, 'duckdb-node-eh.worker.cjs');
+	const outdir = path.join(__dirname, 'dist', 'duckdb');
+
+	fs.mkdirSync(outdir, { recursive: true });
+
+	await esbuild.build({
+		entryPoints: [entry],
+		bundle: true,
+		platform: 'node',
+		format: 'cjs',
+		outfile: path.join(outdir, 'duckdb-node-eh.bundled.worker.cjs'),
+		target: ['node18'],
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		// bufferutil/utf-8-validate are optional native deps for ws; mark external so build succeeds without them
+		external: ['bufferutil', 'utf-8-validate'],
+		banner: {
+			js: "const path = require('path');",
+		},
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
+
+	console.log('[build] Bundled DuckDB worker');
 }
 
 // Build CSS with Tailwind
@@ -80,7 +108,8 @@ function buildCss() {
 async function main() {
 	// Copy WASM files first
 	copyWasmFiles();
-	copyDuckdbRuntime();
+	copyDuckdbWasm();
+	await bundleDuckdbWorker();
 	
 	// Build CSS
 	buildCss();

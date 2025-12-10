@@ -68,7 +68,7 @@ export class DuckdbService {
 
     // Initialize DuckDB-WASM with native worker_threads (polyfilled to Web Worker API)
     const duckdbRuntimeDir = path.join(this.extensionPath, 'dist', 'duckdb');
-    const workerPath = path.join(duckdbRuntimeDir, 'duckdb-node-eh.worker.cjs');
+    const workerPath = path.join(duckdbRuntimeDir, 'duckdb-node-eh.bundled.worker.cjs');
     const wasmPath = path.join(duckdbRuntimeDir, 'duckdb-eh.wasm');
 
     // Write a small wrapper to polyfill the Web Worker API expected by duckdb-wasm
