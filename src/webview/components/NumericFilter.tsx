@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import type { Column } from "@tanstack/react-table";
 
-interface NumericFilterState {
+export interface NumericFilterState {
   min?: number;
   max?: number;
   exclude: boolean;
@@ -14,9 +13,11 @@ interface NumericFilterState {
 }
 
 interface NumericFilterProps {
-  column: Column<Record<string, unknown>, unknown>;
+  columnName: string;
   minValue?: number;
   maxValue?: number;
+  currentFilter: NumericFilterState | undefined;
+  onFilterChange: (columnName: string, filterState: NumericFilterState | undefined) => void;
 }
 
 const styles = {
@@ -155,22 +156,24 @@ const defaultState: NumericFilterState = {
   showAcronyms: true,
 };
 
-export function NumericFilter({ column, minValue, maxValue }: NumericFilterProps) {
+export function NumericFilter({ columnName, minValue, maxValue, currentFilter, onFilterChange }: NumericFilterProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [filterState, setFilterState] = useState<NumericFilterState>(defaultState);
+  const [filterState, setFilterState] = useState<NumericFilterState>(currentFilter || defaultState);
   const [dropdownPosition, setDropdownPosition] = useState<'left' | 'right'>('left');
   const dropdownRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
-  const isActive = filterState.min !== undefined || 
-                   filterState.max !== undefined || 
-                   filterState.exclude ||
-                   !filterState.showEPS ||
-                   !filterState.showNA ||
-                   !filterState.showPosInf ||
-                   !filterState.showNegInf ||
-                   !filterState.showUNDF ||
-                   !filterState.showAcronyms;
+  const isActive = currentFilter !== undefined && (
+    currentFilter.min !== undefined || 
+    currentFilter.max !== undefined || 
+    currentFilter.exclude ||
+    !currentFilter.showEPS ||
+    !currentFilter.showNA ||
+    !currentFilter.showPosInf ||
+    !currentFilter.showNegInf ||
+    !currentFilter.showUNDF ||
+    !currentFilter.showAcronyms
+  );
 
   // Calculate dropdown position when opening
   useEffect(() => {
@@ -208,13 +211,22 @@ export function NumericFilter({ column, minValue, maxValue }: NumericFilterProps
 
   const handleReset = () => {
     setFilterState(defaultState);
-    column.setFilterValue(undefined);
+    onFilterChange(columnName, undefined);
   };
 
   const handleApply = () => {
-    column.setFilterValue(filterState);
+    onFilterChange(columnName, filterState);
     setIsOpen(false);
   };
+
+  // Sync local state with current filter when opening
+  useEffect(() => {
+    if (isOpen && currentFilter) {
+      setFilterState(currentFilter);
+    } else if (isOpen && !currentFilter) {
+      setFilterState(defaultState);
+    }
+  }, [isOpen, currentFilter]);
 
   return (
     <div style={styles.container}>

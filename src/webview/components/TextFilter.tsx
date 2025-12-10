@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from "react";
-import type { Column } from "@tanstack/react-table";
 
 interface TextFilterProps {
-  column: Column<Record<string, unknown>, unknown>;
+  columnName: string;
   uniqueValues: string[];
+  currentFilter: string[] | undefined;
+  onFilterChange: (columnName: string, selectedValues: string[] | undefined) => void;
 }
 
 const styles = {
@@ -154,7 +155,7 @@ const styles = {
   },
 };
 
-export function TextFilter({ column, uniqueValues }: TextFilterProps) {
+export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterChange }: TextFilterProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedValues, setSelectedValues] = useState<Set<string>>(new Set(uniqueValues));
@@ -163,7 +164,7 @@ export function TextFilter({ column, uniqueValues }: TextFilterProps) {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
-  const filterValue = (column.getFilterValue() as string[]) || [];
+  const filterValue = currentFilter || [];
   const isActive = filterValue.length > 0 && filterValue.length < uniqueValues.length;
 
   // Filter values based on search term
@@ -252,9 +253,9 @@ export function TextFilter({ column, uniqueValues }: TextFilterProps) {
   const handleApply = () => {
     // If all values selected, clear filter
     if (selectedValues.size === uniqueValues.length) {
-      column.setFilterValue(undefined);
+      onFilterChange(columnName, undefined);
     } else {
-      column.setFilterValue(Array.from(selectedValues));
+      onFilterChange(columnName, Array.from(selectedValues));
     }
     setIsOpen(false);
   };

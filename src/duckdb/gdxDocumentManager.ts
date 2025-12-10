@@ -16,10 +16,12 @@ export class GdxDocumentManager {
   private _onDocumentOpened = new vscode.EventEmitter<GdxDocumentState>();
   private _onDocumentClosed = new vscode.EventEmitter<vscode.Uri>();
   private _onFilterLoadingChanged = new vscode.EventEmitter<{ uri: vscode.Uri; isLoading: boolean }>();
+  private _onDomainValuesLoaded = new vscode.EventEmitter<{ uri: vscode.Uri; columnName: string; values: string[] }>();
 
   readonly onDocumentOpened = this._onDocumentOpened.event;
   readonly onDocumentClosed = this._onDocumentClosed.event;
   readonly onFilterLoadingChanged = this._onFilterLoadingChanged.event;
+  readonly onDomainValuesLoaded = this._onDomainValuesLoaded.event;
 
   constructor(duckdbService: DuckdbService) {
     this.duckdbService = duckdbService;
@@ -176,6 +178,10 @@ export class GdxDocumentManager {
             state.domainValuesCache.set(symbol, new Map());
           }
           state.domainValuesCache.get(symbol)!.set(dim, values);
+          
+          // Emit event so webview can be notified
+          const columnName = `dim_${dim}`;
+          this._onDomainValuesLoaded.fire({ uri, columnName, values });
         }).catch(err => {
           if (!(err instanceof vscode.CancellationError)) {
             console.error(`Error loading dimension ${dim} for ${symbol}:`, err);
@@ -238,5 +244,6 @@ export class GdxDocumentManager {
     this._onDocumentOpened.dispose();
     this._onDocumentClosed.dispose();
     this._onFilterLoadingChanged.dispose();
+    this._onDomainValuesLoaded.dispose();
   }
 }

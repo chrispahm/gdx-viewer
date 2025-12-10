@@ -1,18 +1,15 @@
 import {
   flexRender,
   getCoreRowModel,
-  getSortedRowModel,
-  getFilteredRowModel,
   useReactTable,
   type ColumnDef,
   type SortingState,
-  type ColumnFiltersState,
-  type VisibilityState,
 } from "@tanstack/react-table";
-import { useState, useMemo } from "react";
-import { NumericFilter } from "./NumericFilter";
+import { useState, useMemo, useCallback } from "react";
+import { NumericFilter, type NumericFilterState } from "./NumericFilter";
 import { TextFilter } from "./TextFilter";
 import type { DisplayAttributes } from "./AttributesPanel";
+import type { ColumnFilter, ColumnSort } from "../App";
 
 interface DataTableProps {
   columns: string[];
@@ -23,6 +20,11 @@ interface DataTableProps {
   onPageChange: (pageIndex: number) => void;
   onPageSizeChange: (pageSize: number) => void;
   displayAttributes: DisplayAttributes;
+  filters: ColumnFilter[];
+  sorts: ColumnSort[];
+  onFiltersChange: (filters: ColumnFilter[]) => void;
+  onSortsChange: (sorts: ColumnSort[]) => void;
+  domainValues: Map<string, string[]>;
 }
 const SUPERSCRIPTS = {
   '0': '⁰',
@@ -303,18 +305,22 @@ export function DataTable({
   onPageChange,
   onPageSizeChange,
   displayAttributes,
+  filters,
+  sorts,
+  onFiltersChange,
+  onSortsChange,
+  domainValues,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   
-  // Initialize column visibility - hide specified columns
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(() => {
-    const visibility: VisibilityState = {};
-    HIDDEN_COLUMNS.forEach(col => {
-      visibility[col] = false;
-    });
-    return visibility;
-  });
+  // Convert ColumnSort[] to SortingState for display purposes
+  useMemo(() => {
+    const tanstackSorting: SortingState = sorts.map(sort => ({
+      id: sort.columnName,
+      desc: sort.direction === 'desc'
+    }));
+    setSorting(tanstackSorting);
+  }, [sorts]);
 
   // Filter out hidden columns from display
   const visibleColumns = useMemo(() => 
@@ -322,44 +328,86 @@ export function DataTable({
     [columns]
   );
 
-  // Compute unique values for each column for faceted filtering
+  // Compute unique values for text columns from current data as fallback
+  // This provides filter options if domain values haven't loaded yet
   const columnUniqueValues = useMemo(() => {
     const values: Record<string, Set<string>> = {};
     visibleColumns.forEach(col => {
-      values[col] = new Set<string>();
-    });
-    data.forEach(row => {
-      visibleColumns.forEach(col => {
-        const value = row[col];
-        if (value !== null && value !== undefined) {
-          values[col].add(String(value));
-        }
-      });
+      if (!isNumericColumn(data, col)) {
+        values[col] = new Set<string>();
+        data.forEach(row => {
+          const value = row[col];
+          if (value !== null && value !== undefined) {
+            values[col].add(String(value));
+          }
+        });
+      }
     });
     return values;
   }, [data, visibleColumns]);
 
-  // Compute min/max for numeric columns
-  const numericColumnStats = useMemo(() => {
-    const stats: Record<string, { min: number; max: number }> = {};
-    visibleColumns.forEach(col => {
-      if (isNumericColumn(data, col)) {
-        let min = Infinity;
-        let max = -Infinity;
-        data.forEach(row => {
-          const value = row[col];
-          if (typeof value === 'number' && isFinite(value)) {
-            min = Math.min(min, value);
-            max = Math.max(max, value);
+  // Helper to get current filter for a column
+  const getColumnFilter = useCallback((columnName: string) => {
+    const filter = filters.find(f => f.columnName === columnName);
+    return filter?.filterValue;
+  }, [filters]);
+
+  // Helper to get current sort for a column
+  const getColumnSort = useCallback((columnName: string) => {
+    const sort = sorts.find(s => s.columnName === columnName);
+    return sort;
+  }, [sorts]);
+
+  // Handle filter change from filter components
+  const handleFilterChange = useCallback((columnName: string, filterValue: NumericFilterState | string[] | undefined) => {
+    let newFilters: ColumnFilter[];
+    if (filterValue === undefined) {
+      // Remove filter
+      newFilters = filters.filter(f => f.columnName !== columnName);
+    } else {
+      // Add or update filter
+      const existingIndex = filters.findIndex(f => f.columnName === columnName);
+      if (existingIndex >= 0) {
+        newFilters = [...filters];
+        newFilters[existingIndex] = {
+          columnName,
+          filterValue: Array.isArray(filterValue) 
+            ? { selectedValues: filterValue }
+            : filterValue
+        };
+      } else {
+        newFilters = [
+          ...filters,
+          {
+            columnName,
+            filterValue: Array.isArray(filterValue) 
+              ? { selectedValues: filterValue }
+              : filterValue
           }
-        });
-        if (isFinite(min) && isFinite(max)) {
-          stats[col] = { min, max };
-        }
+        ];
       }
-    });
-    return stats;
-  }, [data, visibleColumns]);
+    }
+    onFiltersChange(newFilters);
+  }, [filters, onFiltersChange]);
+
+  // Handle sort change from column headers
+  const handleSortChange = useCallback((columnName: string) => {
+    const currentSort = getColumnSort(columnName);
+    let newSorts: ColumnSort[];
+    
+    if (!currentSort) {
+      // Add ascending sort
+      newSorts = [{ columnName, direction: 'asc' }];
+    } else if (currentSort.direction === 'asc') {
+      // Change to descending
+      newSorts = [{ columnName, direction: 'desc' }];
+    } else {
+      // Remove sort
+      newSorts = [];
+    }
+    
+    onSortsChange(newSorts);
+  }, [sorts, getColumnSort, onSortsChange]);
 
   const tableColumns: ColumnDef<Record<string, unknown>>[] = visibleColumns.map(
     (col) => {
@@ -368,37 +416,46 @@ export function DataTable({
       
       return {
         accessorKey: col,
-        header: ({ column }) => (
-          <div style={styles.headerContent}>
-            <button
-              style={styles.headerButton}
-              onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
-            >
-              {displayName}
-              <span style={{ opacity: column.getIsSorted() ? 1 : 0.3 }}>
-                {column.getIsSorted() === "asc" ? "↑" : column.getIsSorted() === "desc" ? "↓" : "↕"}
-              </span>
-            </button>
-            {isNumeric ? (
-              <NumericFilter
-                column={column}
-                minValue={numericColumnStats[col]?.min}
-                maxValue={numericColumnStats[col]?.max}
-              />
-            ) : (
-              <TextFilter
-                column={column}
-                uniqueValues={Array.from(columnUniqueValues[col] || []).sort()}
-              />
-            )}
-          </div>
-        ),
+        header: ({ column }) => {
+          const currentSort = getColumnSort(col);
+          const currentFilter = getColumnFilter(col);
+          
+          return (
+            <div style={styles.headerContent}>
+              <button
+                style={styles.headerButton}
+                onClick={() => handleSortChange(col)}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+              >
+                {displayName}
+                <span style={{ opacity: currentSort ? 1 : 0.3 }}>
+                  {currentSort?.direction === "asc" ? "↑" : currentSort?.direction === "desc" ? "↓" : "↕"}
+                </span>
+              </button>
+              {isNumeric ? (
+                <NumericFilter
+                  columnName={col}
+                  minValue={undefined}
+                  maxValue={undefined}
+                  currentFilter={currentFilter as NumericFilterState | undefined}
+                  onFilterChange={handleFilterChange}
+                />
+              ) : (
+                <TextFilter
+                  columnName={col}
+                  uniqueValues={domainValues.get(col) || Array.from(columnUniqueValues[col] || []).sort()}
+                  currentFilter={(currentFilter as any)?.selectedValues}
+                  onFilterChange={(name, values) => handleFilterChange(name, values)}
+                />
+              )}
+            </div>
+          );
+        },
         cell: ({ row }) => {
           const value = row.getValue(col);
           const { display, isSpecial } = formatCellValue(value, col, displayAttributes);
@@ -411,29 +468,6 @@ export function DataTable({
           }
           return display;
         },
-        filterFn: (row, columnId, filterValue) => {
-          // Handle text filter (array of selected values)
-          if (Array.isArray(filterValue)) {
-            if (filterValue.length === 0) return true;
-            const value = row.getValue(columnId);
-            const stringValue = value === null || value === undefined ? '' : String(value);
-            return filterValue.includes(stringValue);
-          }
-          // Handle numeric filter
-          if (filterValue && typeof filterValue === 'object') {
-            const value = row.getValue(columnId);
-            if (typeof value !== 'number') return true;
-            
-            const { min, max, exclude } = filterValue as { min?: number; max?: number; exclude: boolean };
-            let inRange = true;
-            
-            if (min !== undefined && value < min) inRange = false;
-            if (max !== undefined && value > max) inRange = false;
-            
-            return exclude ? !inRange : inRange;
-          }
-          return true;
-        },
       };
     }
   );
@@ -442,20 +476,15 @@ export function DataTable({
     data,
     columns: tableColumns,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
     onSortingChange: setSorting,
-    onColumnFiltersChange: setColumnFilters,
-    onColumnVisibilityChange: setColumnVisibility,
     state: {
       sorting,
-      columnFilters,
-      columnVisibility,
     },
     manualPagination: true,
+    manualSorting: true,
+    manualFiltering: true,
   });
 
-  const filteredRowCount = table.getFilteredRowModel().rows.length;
   const totalPages = Math.ceil(totalRows / pageSize);
   const canPreviousPage = pageIndex > 0;
   const canNextPage = pageIndex < totalPages - 1;
@@ -521,8 +550,8 @@ export function DataTable({
           <span>Page {pageIndex + 1} of {totalPages || 1}</span>
           <span>·</span>
           <span>
-            {filteredRowCount !== data.length 
-              ? `${filteredRowCount} of ${data.length} rows (filtered)`
+            {filters.length > 0 
+              ? `${data.length} rows on page (filtered)`
               : `${totalRows.toLocaleString()} total rows`
             }
           </span>

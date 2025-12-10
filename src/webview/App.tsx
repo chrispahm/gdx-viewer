@@ -17,6 +17,139 @@ interface QueryResult {
   rowCount: number;
 }
 
+// Filter types for SQL generation
+export interface NumericFilterState {
+  min?: number;
+  max?: number;
+  exclude: boolean;
+  showEPS: boolean;
+  showNA: boolean;
+  showPosInf: boolean;
+  showNegInf: boolean;
+  showUNDF: boolean;
+  showAcronyms: boolean;
+}
+
+export interface TextFilterState {
+  selectedValues: string[];
+}
+
+export type FilterValue = NumericFilterState | TextFilterState;
+
+export interface ColumnFilter {
+  columnName: string;
+  filterValue: FilterValue;
+}
+
+export interface ColumnSort {
+  columnName: string;
+  direction: 'asc' | 'desc';
+}
+
+// Helper to check if a filter is numeric
+function isNumericFilter(filter: FilterValue): filter is NumericFilterState {
+  return 'exclude' in filter;
+}
+
+// SQL Builder function
+function buildSqlQuery(
+  symbolName: string,
+  filters: ColumnFilter[],
+  sorts: ColumnSort[],
+  pageSize: number,
+  pageIndex: number
+): string {
+  let sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${symbolName}')`;
+  
+  // Build WHERE clause from filters
+  const whereClauses: string[] = [];
+  for (const filter of filters) {
+    const { columnName, filterValue } = filter;
+    
+    if (isNumericFilter(filterValue)) {
+      // Numeric filter with range and special values
+      const conditions: string[] = [];
+      
+      // Check if any special values are disabled (i.e., we need to filter them out)
+      const hasDisabledSpecialValues = 
+        !filterValue.showEPS || 
+        !filterValue.showNA || 
+        !filterValue.showPosInf || 
+        !filterValue.showNegInf || 
+        !filterValue.showUNDF;
+      
+      // Handle numeric range
+      if (filterValue.min !== undefined || filterValue.max !== undefined) {
+        const rangeConditions: string[] = [];
+        if (filterValue.min !== undefined) {
+          rangeConditions.push(`"${columnName}" >= ${filterValue.min}`);
+        }
+        if (filterValue.max !== undefined) {
+          rangeConditions.push(`"${columnName}" <= ${filterValue.max}`);
+        }
+        const rangeClause = rangeConditions.join(' AND ');
+        
+        if (filterValue.exclude) {
+          // Exclude range - must be outside the range AND be a valid number
+          conditions.push(`("${columnName}" IS NOT NULL AND isfinite("${columnName}") AND NOT (${rangeClause}))`);
+        } else {
+          // Include range
+          conditions.push(`(${rangeClause})`);
+        }
+      }
+      
+      // If not all special values are shown, we need to explicitly allow/disallow them
+      if (hasDisabledSpecialValues) {
+        const allowedSpecialConditions: string[] = [];
+        
+        // NULL values (EPS, NA, UNDF)
+        if (filterValue.showEPS || filterValue.showNA || filterValue.showUNDF) {
+          allowedSpecialConditions.push(`"${columnName}" IS NULL`);
+        }
+        
+        // Infinity values
+        if (filterValue.showPosInf) {
+          allowedSpecialConditions.push(`"${columnName}" = 'Infinity'::DOUBLE`);
+        }
+        if (filterValue.showNegInf) {
+          allowedSpecialConditions.push(`"${columnName}" = '-Infinity'::DOUBLE`);
+        }
+        
+        if (allowedSpecialConditions.length > 0) {
+          conditions.push(`(${allowedSpecialConditions.join(' OR ')})`);
+        }
+      }
+      
+      if (conditions.length > 0) {
+        whereClauses.push(`(${conditions.join(' OR ')})`);
+      }
+    } else {
+      // Text filter with selected values
+      if (filterValue.selectedValues.length > 0) {
+        const escapedValues = filterValue.selectedValues.map(v => `'${v.replace(/'/g, "''")}'`);
+        whereClauses.push(`"${columnName}" IN (${escapedValues.join(', ')})`);
+      }
+    }
+  }
+  
+  if (whereClauses.length > 0) {
+    sql += ` WHERE ${whereClauses.join(' AND ')}`;
+  }
+  
+  // Build ORDER BY clause from sorts
+  if (sorts.length > 0) {
+    const orderClauses = sorts.map(sort => 
+      `"${sort.columnName}" ${sort.direction.toUpperCase()}`
+    );
+    sql += ` ORDER BY ${orderClauses.join(', ')}`;
+  }
+  
+  // Add pagination
+  sql += ` LIMIT ${pageSize} OFFSET ${pageIndex * pageSize}`;
+  
+  return sql;
+}
+
 interface VSCodeApi {
   postMessage(message: unknown): void;
   getState(): unknown;
@@ -53,6 +186,9 @@ export function App() {
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(100);
   const [totalRows, setTotalRows] = useState(0);
+  const [filters, setFilters] = useState<ColumnFilter[]>([]);
+  const [sorts, setSorts] = useState<ColumnSort[]>([]);
+  const [domainValues, setDomainValues] = useState<Map<string, string[]>>(new Map());
   const [displayAttributes, setDisplayAttributes] = useState<DisplayAttributes>({
     squeezeDefaults: true,
     squeezeTrailingZeroes: false,
@@ -74,14 +210,87 @@ export function App() {
     }
   }, []);
 
+  const executeQueryWithFiltersAndSorts = useCallback(
+    async (symbol: GdxSymbol, newPageIndex: number, newPageSize: number, newFilters: ColumnFilter[], newSorts: ColumnSort[]) => {
+      // Build the query for data
+      const sql = buildSqlQuery(symbol.name, newFilters, newSorts, newPageSize, newPageIndex);
+      setQuery(sql);
+      
+      // Also execute a count query to get total filtered rows
+      const countSql = buildSqlQuery(symbol.name, newFilters, [], 0, 0)
+        .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
+        .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
+      
+      setIsLoading(true);
+      setError(null);
+      
+      try {
+        // Execute both queries in parallel
+        const [dataResult, countResult] = await Promise.all([
+          sendRequest<QueryResult>("executeQuery", { sql }),
+          sendRequest<QueryResult>("executeQuery", { sql: countSql })
+        ]);
+        
+        setResult(dataResult);
+        
+        // Update total rows based on count query
+        if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
+          const count = typeof countResult.rows[0].count === 'bigint' 
+            ? Number(countResult.rows[0].count)
+            : countResult.rows[0].count as number;
+          setTotalRows(count);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Query failed");
+        setResult(null);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    []
+  );
+
+  const handleFiltersChange = useCallback(
+    async (newFilters: ColumnFilter[]) => {
+      if (!selectedSymbol) return;
+      setFilters(newFilters);
+      setPageIndex(0); // Reset to first page when filters change
+      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, newFilters, sorts);
+    },
+    [selectedSymbol, pageSize, sorts, executeQueryWithFiltersAndSorts]
+  );
+
+  const handleSortsChange = useCallback(
+    async (newSorts: ColumnSort[]) => {
+      if (!selectedSymbol) return;
+      setSorts(newSorts);
+      setPageIndex(0); // Reset to first page when sorts change
+      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, filters, newSorts);
+    },
+    [selectedSymbol, pageSize, filters, executeQueryWithFiltersAndSorts]
+  );
+
+  const handleResetFilters = useCallback(
+    async () => {
+      if (!selectedSymbol) return;
+      setFilters([]);
+      setSorts([]);
+      setPageIndex(0);
+      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, [], []);
+    },
+    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts]
+  );
+
   const handleSymbolSelect = useCallback(
     async (symbol: GdxSymbol) => {
       setSelectedSymbol(symbol);
       setPageIndex(0);
       setTotalRows(symbol.recordCount);
+      setFilters([]); // Reset filters when changing symbols
+      setSorts([]); // Reset sorts when changing symbols
 
       // Build default query
-      const sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${symbol.name}') LIMIT ${pageSize} OFFSET 0`;
+      const sql = buildSqlQuery(symbol.name, [], [], pageSize, 0);
       setQuery(sql);
 
       vscode.postMessage({ type: "selectSymbol", symbol });
@@ -94,12 +303,9 @@ export function App() {
     async (newPageIndex: number) => {
       if (!selectedSymbol) return;
       setPageIndex(newPageIndex);
-      const offset = newPageIndex * pageSize;
-      const sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${selectedSymbol.name}') LIMIT ${pageSize} OFFSET ${offset}`;
-      setQuery(sql);
-      await executeQuery(sql);
+      await executeQueryWithFiltersAndSorts(selectedSymbol, newPageIndex, pageSize, filters, sorts);
     },
-    [selectedSymbol, pageSize, executeQuery]
+    [selectedSymbol, pageSize, filters, sorts, executeQueryWithFiltersAndSorts]
   );
 
   const handlePageSizeChange = useCallback(
@@ -107,19 +313,18 @@ export function App() {
       if (!selectedSymbol) return;
       setPageSize(newPageSize);
       setPageIndex(0);
-      const sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${selectedSymbol.name}') LIMIT ${newPageSize} OFFSET 0`;
-      setQuery(sql);
-      await executeQuery(sql);
+      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, newPageSize, filters, sorts);
     },
-    [selectedSymbol, executeQuery]
+    [selectedSymbol, filters, sorts, executeQueryWithFiltersAndSorts]
   );
 
   const handleExport = useCallback(
     async (format: 'csv' | 'parquet' | 'excel') => {
-      if (!query) return;
+      if (!query || !selectedSymbol) return;
       setIsExporting(true);
       setError(null);
       try {
+        // Build export query - strip LIMIT/OFFSET on backend
         await sendRequest('exportData', { format, query });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Export failed');
@@ -127,7 +332,7 @@ export function App() {
         setIsExporting(false);
       }
     },
-    [query]
+    [query, selectedSymbol]
   );
 
   const handleCancelFilterLoading = useCallback(() => {
@@ -150,7 +355,9 @@ export function App() {
             setSelectedSymbol(firstSymbol);
             setPageIndex(0);
             setTotalRows(firstSymbol.recordCount);
-            const sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${firstSymbol.name}') LIMIT 100 OFFSET 0`;
+            setFilters([]); // Reset filters
+            setSorts([]); // Reset sorts
+            const sql = buildSqlQuery(firstSymbol.name, [], [], 100, 0);
             setQuery(sql);
             // Execute query for first symbol, then start filter loading
             setIsLoading(true);
@@ -210,6 +417,21 @@ export function App() {
         case "filterLoadingChanged":
           setIsFilterLoading(message.isLoading);
           break;
+
+        case "domainValues":
+          console.log('[GDX Webview] Received domain values:', message.columnName);
+          if (message.values) {
+            setDomainValues(prev => {
+              const updated = new Map(prev);
+              updated.set(message.columnName, message.values);
+              return updated;
+            });
+          }
+          break;
+
+        case "domainValuesError":
+          console.error('[GDX Webview] Domain values error:', message.error);
+          break;
       }
     };
 
@@ -239,8 +461,34 @@ export function App() {
       />
 
       {error && (
-        <div className="error-message">
-          {error}
+        <div style={{
+          padding: '8px 12px',
+          backgroundColor: 'var(--vscode-inputValidation-errorBackground)',
+          color: 'var(--vscode-inputValidation-errorForeground)',
+          borderBottom: '1px solid var(--vscode-inputValidation-errorBorder)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px'
+        }}>
+          <span>{error}</span>
+          {(filters.length > 0 || sorts.length > 0) && (
+            <button
+              onClick={handleResetFilters}
+              style={{
+                padding: '4px 12px',
+                backgroundColor: 'var(--vscode-button-secondaryBackground)',
+                color: 'var(--vscode-button-secondaryForeground)',
+                border: 'none',
+                borderRadius: '3px',
+                cursor: 'pointer',
+                fontFamily: 'var(--vscode-font-family)',
+                fontSize: 'var(--vscode-font-size)',
+              }}
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
       )}
 
@@ -255,6 +503,11 @@ export function App() {
             onPageChange={handlePageChange}
             onPageSizeChange={handlePageSizeChange}
             displayAttributes={displayAttributes}
+            filters={filters}
+            sorts={sorts}
+            onFiltersChange={handleFiltersChange}
+            onSortsChange={handleSortsChange}
+            domainValues={domainValues}
           />
         ) : !isLoading && !selectedSymbol ? (
           <div style={{

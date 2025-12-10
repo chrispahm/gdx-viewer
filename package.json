@@ -13,7 +13,17 @@
     "vscode": "^1.106.1"
   },
   "categories": [
+    "Programming Languages",
+    "Visualization",
+    "Data Science",
     "Other"
+  ],
+  "keywords": [
+    "gams",
+    "gdx",
+    "mathematical programming",
+    "optimisation",
+    "operations research"
   ],
   "activationEvents": [
     "onCustomEditor:gdxViewer.gdxEditor"

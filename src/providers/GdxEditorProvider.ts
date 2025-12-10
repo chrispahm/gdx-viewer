@@ -43,6 +43,18 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
         });
       }
     });
+
+    // Listen for domain values loaded to notify webviews
+    documentManager.onDomainValuesLoaded(({ uri, columnName, values }) => {
+      const webview = this.webviews.get(uri.toString());
+      if (webview) {
+        webview.webview.postMessage({
+          type: 'domainValues',
+          columnName,
+          values,
+        });
+      }
+    });
   }
 
   async openCustomDocument(uri: vscode.Uri): Promise<GdxDocument> {
