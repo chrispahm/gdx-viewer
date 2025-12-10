@@ -50,6 +50,23 @@ function copyWasmFiles() {
 	console.log('[build] Copied WASM files');
 }
 
+// Copy DuckDB runtime files needed at runtime (worker + wasm)
+function copyDuckdbRuntime() {
+	const runtimeSrcDir = path.join(__dirname, 'node_modules', '@duckdb', 'duckdb-wasm', 'dist');
+	const runtimeDestDir = path.join(__dirname, 'dist', 'duckdb');
+
+	fs.mkdirSync(runtimeDestDir, { recursive: true });
+
+	for (const file of ['duckdb-node-eh.worker.cjs', 'duckdb-eh.wasm']) {
+		fs.copyFileSync(
+			path.join(runtimeSrcDir, file),
+			path.join(runtimeDestDir, file)
+		);
+	}
+
+	console.log('[build] Copied DuckDB runtime');
+}
+
 // Build CSS with Tailwind
 function buildCss() {
 	fs.mkdirSync(path.join(__dirname, 'dist/webview'), { recursive: true });
@@ -63,6 +80,7 @@ function buildCss() {
 async function main() {
 	// Copy WASM files first
 	copyWasmFiles();
+	copyDuckdbRuntime();
 	
 	// Build CSS
 	buildCss();
