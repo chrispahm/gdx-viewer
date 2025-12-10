@@ -25,6 +25,7 @@
     "optimisation",
     "operations research"
   ],
+  "icon": "media/icon.png",
   "activationEvents": [
     "onCustomEditor:gdxViewer.gdxEditor"
   ],
