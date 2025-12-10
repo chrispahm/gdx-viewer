@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/chrispahm/gdx-viewer"
   },
-  "version": "0.0.2",
+  "version": "0.0.3",
   "engines": {
     "vscode": "^1.106.1"
   },
@@ -31,8 +31,7 @@
         "priority": "default"
       }
     ],
-    "viewsContainers": {
-    },
+    "viewsContainers": {},
     "views": {
       "explorer": [
         {
