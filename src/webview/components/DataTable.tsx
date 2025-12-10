@@ -24,19 +24,77 @@ interface DataTableProps {
   onPageSizeChange: (pageSize: number) => void;
   displayAttributes: DisplayAttributes;
 }
+const SUPERSCRIPTS = {
+  '0': '⁰',
+  '1': '¹',
+  '2': '²',
+  '3': '³',
+  '4': '⁴',
+  '5': '⁵',
+  '6': '⁶',
+  '7': '⁷',
+  '8': '⁸',
+  '9': '⁹',
+  '+': '⁺',
+  '-': '⁻',
+  'a': 'ᵃ',
+  'b': 'ᵇ',
+  'c': 'ᶜ',
+  'd': 'ᵈ',
+  'e': 'ᵉ',
+  'f': 'ᶠ',
+  'g': 'ᵍ',
+  'h': 'ʰ',
+  'i': 'ⁱ',
+  'j': 'ʲ',
+  'k': 'ᵏ',
+  'l': 'ˡ',
+  'm': 'ᵐ',
+  'n': 'ⁿ',
+  'o': 'ᵒ',
+  'p': 'ᵖ',
+  'r': 'ʳ',
+  's': 'ˢ',
+  't': 'ᵗ',
+  'u': 'ᵘ',
+  'v': 'ᵛ',
+  'w': 'ʷ',
+  'x': 'ˣ',
+  'y': 'ʸ',
+  'z': 'ᶻ'
+}
+
+function superScriptNumber(num: number, base: number = 10): string {
+  var numStr = num.toString(base)
+  if (numStr === 'NaN') { return 'ᴺᵃᴺ' }
+  if (numStr === 'Infinity') { return '⁺ᴵⁿᶠ' }
+  if (numStr === '-Infinity') { return '⁻ᴵⁿᶠ' }
+  return numStr.split('').map(function (c) {
+    var supc = SUPERSCRIPTS[c as keyof typeof SUPERSCRIPTS]
+    if (supc) {
+      return supc
+    }
+    return ''
+  }).join('')
+}
 
 // Columns to always hide
-const HIDDEN_COLUMNS = ['is_sparse_break', 'is_dense_run'];
+const HIDDEN_COLUMNS = ['is_sparse_break', 'is_dense_run', 'is_member'];
 
 // Column display name mappings
 const COLUMN_NAME_MAPPING: Record<string, string> = {
-  'is_member': 'Text',
+  'description': 'Text',
 };
 
 // Capitalize first letter of each word
 function formatColumnName(name: string): string {
   if (COLUMN_NAME_MAPPING[name]) {
     return COLUMN_NAME_MAPPING[name];
+  }
+  if (name.startsWith('dim_')) {
+    const dimIndex = name.slice(4);
+    // Dimension is wildcard, add dimIndex as superscript
+    return '* ' + superScriptNumber(Number(dimIndex));
   }
   return name.split('_').map(word => 
     word.charAt(0).toUpperCase() + word.slice(1)
@@ -68,12 +126,13 @@ function formatCellValue(
     if (columnName === 'lower') {
       return { display: '-INF', isSpecial: true };
     }
+    if (columnName === 'marginal') {
+      return { display: 'EPS', isSpecial: true };
+    }
+    if (columnName === 'description') {
+      return { display: 'Y', isSpecial: false };
+    }
     return { display: 'NULL', isSpecial: true };
-  }
-
-  // Handle is_member column
-  if (columnName === 'is_member') {
-    return { display: value ? 'Y' : 'N', isSpecial: false };
   }
 
   // Handle numbers
