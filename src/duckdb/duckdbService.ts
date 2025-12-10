@@ -40,32 +40,6 @@ export class DuckdbService {
   }
 
   async initialize(): Promise<void> {
-    // Start HTTP server for WASM extensions on dynamic port
-    const repositoryDir = path.join(this.extensionPath, 'dist', 'wasm');
-    
-    this.server = http.createServer(async (req, res) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      const urlPath = req.url || '';
-      try {
-        const filePath = path.join(repositoryDir, urlPath);
-        const content = await fs.readFile(filePath);
-        res.setHeader('Content-Type', 'application/wasm');
-        res.writeHead(200);
-        res.end(content);
-      } catch {
-        res.writeHead(404);
-        res.end('Not found');
-      }
-    });
-
-    await new Promise<void>((resolve) => {
-      this.server!.listen(0, () => {
-        const address = this.server!.address();
-        this.port = typeof address === 'object' && address ? address.port : 0;
-        resolve();
-      });
-    });
-
     // Initialize DuckDB-WASM with native worker_threads (polyfilled to Web Worker API)
     const duckdbRuntimeDir = path.join(this.extensionPath, 'dist', 'duckdb');
     const workerPath = path.join(duckdbRuntimeDir, 'duckdb-node-eh.bundled.worker.cjs');
@@ -145,8 +119,11 @@ require('${workerPath.replace(/\\/g, '\\\\')}');
     await this.conn.query('INSTALL excel');
     await this.conn.query('LOAD excel');
     // Load the GDX extension
-    await this.conn.query(`SET custom_extension_repository = 'http://127.0.0.1:${this.port}'`);
-    await this.conn.query('LOAD duckdb_gdx');
+    // await this.conn.query(`SET custom_extension_repository = 'http://127.0.0.1:${this.port}'`);
+    // await this.conn.query('SET extension_directory')
+    // await this.conn.query('LOAD duckdb_gdx');
+    await this.conn.query(`INSTALL duckdb_gdx from 'https://humusklimanetz-couch.thuenen.de/datasets/duckdb_gdx'`);
+    await this.conn.query(`LOAD duckdb_gdx`);
   }
 
   async registerGdxFile(uriString: string, bytes: Uint8Array): Promise<string> {
@@ -267,10 +244,6 @@ require('${workerPath.replace(/\\/g, '\\\\')}');
     if (this.db) {
       await this.db.terminate();
       this.db = null;
-    }
-    if (this.server) {
-      this.server.close();
-      this.server = null;
     }
   }
 }
