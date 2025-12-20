@@ -9,16 +9,20 @@ interface SqlToolbarProps {
   onAttributesChange: (attributes: DisplayAttributes) => void;
   onExport: (format: 'csv' | 'parquet' | 'excel', query: string) => void;
   isExporting?: boolean;
+  hasActiveFilters?: boolean;
+  onResetFilters?: () => void;
 }
 
-export function SqlToolbar({ 
-  defaultQuery, 
-  onExecute, 
+export function SqlToolbar({
+  defaultQuery,
+  onExecute,
   isLoading,
   displayAttributes,
   onAttributesChange,
   onExport,
   isExporting = false,
+  hasActiveFilters = false,
+  onResetFilters,
 }: SqlToolbarProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [query, setQuery] = useState(defaultQuery);
@@ -68,6 +72,40 @@ export function SqlToolbar({
         minHeight: '28px',
         gap: '4px'
       }}>
+        {/* Reset Filters button - only shown when filters are active */}
+        {hasActiveFilters && onResetFilters && (
+          <button
+            onClick={onResetFilters}
+            disabled={isLoading}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '4px 8px',
+              backgroundColor: 'var(--vscode-button-secondaryBackground)',
+              color: 'var(--vscode-button-secondaryForeground)',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: isLoading ? 'not-allowed' : 'pointer',
+              fontFamily: 'var(--vscode-font-family)',
+              fontSize: 'var(--vscode-font-size)',
+              fontWeight: 600,
+              opacity: isLoading ? 0.5 : 1,
+              transition: 'background-color 0.15s'
+            }}
+            onMouseEnter={(e) => {
+              if (!isLoading) {
+                e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryHoverBackground)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryBackground)';
+            }}
+            title="Reset all filters"
+          >
+            Reset Filters
+          </button>
+        )}
         <AttributesPanel
           attributes={displayAttributes}
           onChange={onAttributesChange}
@@ -169,11 +207,11 @@ export function SqlToolbar({
             alignItems: 'center',
             justifyContent: 'center',
             padding: '4px 8px',
-            backgroundColor: isExpanded 
-              ? 'var(--vscode-button-background)' 
+            backgroundColor: isExpanded
+              ? 'var(--vscode-button-background)'
               : 'transparent',
-            color: isExpanded 
-              ? 'var(--vscode-button-foreground)' 
+            color: isExpanded
+              ? 'var(--vscode-button-foreground)'
               : 'var(--vscode-foreground)',
             border: 'none',
             borderRadius: '3px',

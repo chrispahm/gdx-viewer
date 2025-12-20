@@ -1,22 +1,22 @@
 import * as vscode from 'vscode';
-import { GdxDocumentManager, GdxDocumentState } from '../duckdb/gdxDocumentManager';
 import { GdxSymbol } from '../duckdb/duckdbService';
 
 interface GdxDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
-  readonly state: GdxDocumentState;
+  readonly filePath: string;
+  symbols: GdxSymbol[];
 }
 
 class GdxDocumentImpl implements GdxDocument {
+  public symbols: GdxSymbol[] = [];
+
   constructor(
     public readonly uri: vscode.Uri,
-    public readonly state: GdxDocumentState,
-    private readonly documentManager: GdxDocumentManager
-  ) {}
+    public readonly filePath: string
+  ) { }
 
   dispose(): void {
-    // Close document in manager when custom document is disposed
-    this.documentManager.closeDocument(this.uri);
+    // Cleanup is handled via WebSocket
   }
 }
 
@@ -24,6 +24,7 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
   public static readonly viewType = 'gdxViewer.gdxEditor';
 
   private webviews = new Map<string, vscode.WebviewPanel>();
+  private documents = new Map<string, GdxDocumentImpl>();
   private _onDidSelectSymbol = new vscode.EventEmitter<{ uri: vscode.Uri; symbol: GdxSymbol }>();
   private _onDidChangeActiveDocument = new vscode.EventEmitter<vscode.Uri | null>();
   readonly onDidSelectSymbol = this._onDidSelectSymbol.event;
@@ -31,39 +32,20 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly documentManager: GdxDocumentManager
-  ) {
-    // Listen for filter loading changes to notify webviews
-    documentManager.onFilterLoadingChanged(({ uri, isLoading }) => {
-      const webview = this.webviews.get(uri.toString());
-      if (webview) {
-        webview.webview.postMessage({
-          type: 'filterLoadingChanged',
-          isLoading,
-        });
-      }
-    });
+    private readonly serverPort: number
+  ) { }
 
-    // Listen for domain values loaded to notify webviews
-    documentManager.onDomainValuesLoaded(({ uri, columnName, values }) => {
-      const webview = this.webviews.get(uri.toString());
-      if (webview) {
-        webview.webview.postMessage({
-          type: 'domainValues',
-          columnName,
-          values,
-        });
-      }
-    });
+  getSymbolsForDocument(uri: vscode.Uri): GdxSymbol[] | undefined {
+    return this.documents.get(uri.toString())?.symbols;
   }
 
   async openCustomDocument(uri: vscode.Uri): Promise<GdxDocument> {
     console.log('[GDX Extension] Opening custom document:', uri.toString());
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    console.log('[GDX Extension] Read', bytes.length, 'bytes');
-    const state = await this.documentManager.openDocument(uri, bytes);
-    console.log('[GDX Extension] Document opened, symbols:', state.symbols.length);
-    return new GdxDocumentImpl(uri, state, this.documentManager);
+    const filePath = uri.fsPath;
+    console.log('[GDX Extension] File path:', filePath);
+    const doc = new GdxDocumentImpl(uri, filePath);
+    this.documents.set(uri.toString(), doc);
+    return doc;
   }
 
   async resolveCustomEditor(
@@ -87,74 +69,27 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
       console.log('[GDX Extension] Received message from webview:', message.type);
       switch (message.type) {
         case 'ready':
-          // Send initial data
-          console.log('[GDX Extension] Sending init with', document.state.symbols.length, 'symbols');
+          // Send init with server connection info and file path
+          console.log('[GDX Extension] Sending init with server port', this.serverPort);
           webviewPanel.webview.postMessage({
             type: 'init',
-            symbols: document.state.symbols,
-            isFilterLoading: document.state.isFilterLoading,
+            serverPort: this.serverPort,
+            filePath: document.filePath,
+            documentId: uri.toString(),
           });
           break;
 
-        case 'executeQuery':
-          console.log('[GDX Extension] Executing query:', message.sql);
-          try {
-            const result = await this.documentManager.executeQuery(uri, message.sql);
-            console.log('[GDX Extension] Query success, rows:', result.rowCount);
-            webviewPanel.webview.postMessage({
-              type: 'queryResult',
-              requestId: message.requestId,
-              result,
-            });
-          } catch (error) {
-            console.error('[GDX Extension] Query error:', error);
-            webviewPanel.webview.postMessage({
-              type: 'queryError',
-              requestId: message.requestId,
-              error: error instanceof Error ? error.message : 'Unknown error',
-            });
-          }
-          break;
-
-        case 'getDomainValues':
-          try {
-            const values = await this.documentManager.getDomainValues(
-              uri,
-              message.symbol,
-              message.dimIndex
-            );
-            webviewPanel.webview.postMessage({
-              type: 'domainValues',
-              requestId: message.requestId,
-              symbol: message.symbol,
-              dimIndex: message.dimIndex,
-              values,
-            });
-          } catch (error) {
-            webviewPanel.webview.postMessage({
-              type: 'domainValuesError',
-              requestId: message.requestId,
-              error: error instanceof Error ? error.message : 'Unknown error',
-            });
-          }
-          break;
-
-        case 'cancelFilterLoading':
-          this.documentManager.cancelFilterLoading(uri);
-          break;
-
-        case 'startFilterLoading':
-          // Start loading filters for specified symbol (called after data is displayed)
-          const autoLoad = vscode.workspace.getConfiguration('gdxViewer').get<boolean>('autoLoadFilters', true);
-          if (autoLoad) {
-            this.documentManager.startFilterLoading(uri, message.symbol);
+        case 'symbolsLoaded':
+          // Webview received symbols from server, store them for tree view
+          const doc = this.documents.get(uri.toString());
+          if (doc) {
+            doc.symbols = message.symbols;
+            this._onDidChangeActiveDocument.fire(uri);
           }
           break;
 
         case 'selectSymbol':
           this._onDidSelectSymbol.fire({ uri, symbol: message.symbol });
-          // Start loading filters for this symbol
-          this.documentManager.startFilterLoading(uri, message.symbol.name);
           break;
 
         case 'exportData': {
@@ -181,13 +116,13 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
               break;
             }
 
-            await this.documentManager.exportQuery(uri, message.query, format, target.fsPath);
+            // Send export path back to webview to handle via WebSocket
             webviewPanel.webview.postMessage({
-              type: 'exportResult',
+              type: 'exportPath',
               requestId: message.requestId,
               path: target.fsPath,
+              format,
             });
-            vscode.window.showInformationMessage(`Exported to ${target.fsPath}`);
           } catch (error) {
             webviewPanel.webview.postMessage({
               type: 'exportError',
@@ -202,6 +137,7 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
 
     webviewPanel.onDidDispose(() => {
       this.webviews.delete(uri.toString());
+      this.documents.delete(uri.toString());
       this._onDidChangeActiveDocument.fire(null);
       // Hide symbols view when no GDX document is active
       if (this.webviews.size === 0) {
@@ -248,12 +184,13 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     console.log('[GDX Extension] Webview script URI:', scriptUri.toString());
     console.log('[GDX Extension] Webview style URI:', styleUri.toString());
 
+    // CSP needs to allow WebSocket connections to localhost
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src ws://127.0.0.1:* ws://localhost:*;">
   <link href="${styleUri}" rel="stylesheet">
   <title>GDX Viewer</title>
 </head>

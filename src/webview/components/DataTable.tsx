@@ -25,6 +25,7 @@ interface DataTableProps {
   onFiltersChange: (filters: ColumnFilter[]) => void;
   onSortsChange: (sorts: ColumnSort[]) => void;
   domainValues: Map<string, string[]>;
+  dimensionCount: number;
 }
 const SUPERSCRIPTS = {
   '0': '⁰',
@@ -98,7 +99,7 @@ function formatColumnName(name: string): string {
     // Dimension is wildcard, add dimIndex as superscript
     return '* ' + superScriptNumber(Number(dimIndex));
   }
-  return name.split('_').map(word => 
+  return name.split('_').map(word =>
     word.charAt(0).toUpperCase() + word.slice(1)
   ).join(' ');
 }
@@ -116,8 +117,8 @@ function isNumericColumn(data: Record<string, unknown>[], columnName: string): b
 
 // Format cell value based on column and display attributes
 function formatCellValue(
-  value: unknown, 
-  columnName: string, 
+  value: unknown,
+  columnName: string,
   attributes: DisplayAttributes
 ): { display: string; isSpecial: boolean } {
   // Handle null values for upper/lower bounds
@@ -310,9 +311,10 @@ export function DataTable({
   onFiltersChange,
   onSortsChange,
   domainValues,
+  dimensionCount,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
-  
+
   // Convert ColumnSort[] to SortingState for display purposes
   useMemo(() => {
     const tanstackSorting: SortingState = sorts.map(sort => ({
@@ -323,7 +325,7 @@ export function DataTable({
   }, [sorts]);
 
   // Filter out hidden columns from display
-  const visibleColumns = useMemo(() => 
+  const visibleColumns = useMemo(() =>
     columns.filter(col => !HIDDEN_COLUMNS.includes(col)),
     [columns]
   );
@@ -371,7 +373,7 @@ export function DataTable({
         newFilters = [...filters];
         newFilters[existingIndex] = {
           columnName,
-          filterValue: Array.isArray(filterValue) 
+          filterValue: Array.isArray(filterValue)
             ? { selectedValues: filterValue }
             : filterValue
         };
@@ -380,7 +382,7 @@ export function DataTable({
           ...filters,
           {
             columnName,
-            filterValue: Array.isArray(filterValue) 
+            filterValue: Array.isArray(filterValue)
               ? { selectedValues: filterValue }
               : filterValue
           }
@@ -394,7 +396,7 @@ export function DataTable({
   const handleSortChange = useCallback((columnName: string) => {
     const currentSort = getColumnSort(columnName);
     let newSorts: ColumnSort[];
-    
+
     if (!currentSort) {
       // Add ascending sort
       newSorts = [{ columnName, direction: 'asc' }];
@@ -405,21 +407,52 @@ export function DataTable({
       // Remove sort
       newSorts = [];
     }
-    
+
     onSortsChange(newSorts);
   }, [sorts, getColumnSort, onSortsChange]);
+
+  // Helper to get domain values for a column with robust name matching
+  const getDomainValuesForColumn = useCallback((columnName: string) => {
+    // Try exact match first
+    if (domainValues.has(columnName)) {
+      return domainValues.get(columnName);
+    }
+
+    // Check matching by column index
+    // GDX reader usually returns columns in order: dim_1, dim_2, ..., dim_n, value columns
+    // The domain values are keyed by "dim_1", "dim_2", etc.
+    const columnIndex = columns.indexOf(columnName);
+    if (columnIndex !== -1 && columnIndex < dimensionCount) {
+      const normalizedKey = `dim_${columnIndex + 1}`;
+      if (domainValues.has(normalizedKey)) {
+        return domainValues.get(normalizedKey);
+      }
+    }
+
+    // Check for dimension named "dim_X" explicitly (fallback)
+    const dimMatch = columnName.match(/dim_?(\d+)/i);
+    if (dimMatch) {
+      const dimIndex = dimMatch[1];
+      const normalizedKey = `dim_${dimIndex}`;
+      if (domainValues.has(normalizedKey)) {
+        return domainValues.get(normalizedKey);
+      }
+    }
+
+    return undefined;
+  }, [domainValues, columns, dimensionCount]);
 
   const tableColumns: ColumnDef<Record<string, unknown>>[] = visibleColumns.map(
     (col) => {
       const isNumeric = isNumericColumn(data, col);
       const displayName = formatColumnName(col);
-      
+
       return {
         accessorKey: col,
         header: ({ column }) => {
           const currentSort = getColumnSort(col);
           const currentFilter = getColumnFilter(col);
-          
+
           return (
             <div style={styles.headerContent}>
               <button
@@ -448,7 +481,7 @@ export function DataTable({
               ) : (
                 <TextFilter
                   columnName={col}
-                  uniqueValues={domainValues.get(col) || Array.from(columnUniqueValues[col] || []).sort()}
+                  uniqueValues={getDomainValuesForColumn(col) || Array.from(columnUniqueValues[col] || []).sort()}
                   currentFilter={(currentFilter as any)?.selectedValues}
                   onFilterChange={(name, values) => handleFilterChange(name, values)}
                 />
@@ -459,7 +492,7 @@ export function DataTable({
         cell: ({ row }) => {
           const value = row.getValue(col);
           const { display, isSpecial } = formatCellValue(value, col, displayAttributes);
-          
+
           if (isSpecial) {
             return <span style={styles.tdSpecial}>{display}</span>;
           }
@@ -501,9 +534,9 @@ export function DataTable({
                     {header.isPlaceholder
                       ? null
                       : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
+                        header.column.columnDef.header,
+                        header.getContext()
+                      )}
                   </th>
                 ))}
               </tr>
@@ -512,8 +545,8 @@ export function DataTable({
           <tbody>
             {table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row, idx) => (
-                <tr 
-                  key={row.id} 
+                <tr
+                  key={row.id}
                   style={{
                     ...styles.tr,
                     backgroundColor: idx % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)',
@@ -550,7 +583,7 @@ export function DataTable({
           <span>Page {pageIndex + 1} of {totalPages || 1}</span>
           <span>·</span>
           <span>
-            {filters.length > 0 
+            {filters.length > 0
               ? `${data.length} rows on page (filtered)`
               : `${totalRows.toLocaleString()} total rows`
             }
@@ -561,7 +594,7 @@ export function DataTable({
             onChange={(e) => onPageSizeChange(Number(e.target.value))}
             style={styles.select}
           >
-            {[10, 25, 50, 100].map((size) => (
+            {[1000, 10000, 50000].map((size) => (
               <option key={size} value={size}>
                 {size} rows
               </option>

@@ -29,7 +29,7 @@ export class GdxDocumentManager {
 
   async openDocument(uri: vscode.Uri, bytes: Uint8Array): Promise<GdxDocumentState> {
     const key = uri.toString();
-    
+
     // Return existing document if already open
     const existing = this.documents.get(key);
     if (existing) {
@@ -38,7 +38,7 @@ export class GdxDocumentManager {
 
     // Register file with DuckDB
     const registrationName = await this.duckdbService.registerGdxFile(uri.toString(), bytes);
-    
+
     // Get symbols
     const symbols = await this.duckdbService.getSymbols(registrationName);
 
@@ -63,7 +63,7 @@ export class GdxDocumentManager {
   async closeDocument(uri: vscode.Uri): Promise<void> {
     const key = uri.toString();
     const state = this.documents.get(key);
-    
+
     if (state) {
       // Cancel any pending filter loading
       if (state.filterLoadingCts) {
@@ -73,7 +73,7 @@ export class GdxDocumentManager {
 
       // Unregister file from DuckDB
       await this.duckdbService.unregisterFile(state.registrationName);
-      
+
       this.documents.delete(key);
       this._onDocumentClosed.fire(uri);
     }
@@ -115,6 +115,29 @@ export class GdxDocumentManager {
     return values;
   }
 
+  async getFilteredDomainValues(
+    uri: vscode.Uri,
+    symbol: string,
+    dimIndex: number,
+    dimensionFilters: Map<string, string[]>
+  ): Promise<string[]> {
+    const state = this.documents.get(uri.toString());
+    if (!state) {
+      throw new Error('Document not open');
+    }
+
+    // No caching for filtered queries - they vary by filter combination
+    const values = await this.duckdbService.getDomainValues(
+      state.registrationName,
+      symbol,
+      dimIndex,
+      undefined, // no cancellation token
+      dimensionFilters
+    );
+
+    return values;
+  }
+
   async startFilterLoading(uri: vscode.Uri, symbol: string): Promise<void> {
     const state = this.documents.get(uri.toString());
     if (!state) {
@@ -135,7 +158,7 @@ export class GdxDocumentManager {
     // Set loading state and notify before starting async work
     state.isFilterLoading = true;
     this._onFilterLoadingChanged.fire({ uri, isLoading: true });
-    
+
     // Start actual loading (not awaited to run in background)
     this.startFilterLoadingInternal(uri, symbol, symbolInfo);
   }
@@ -178,7 +201,7 @@ export class GdxDocumentManager {
             state.domainValuesCache.set(symbol, new Map());
           }
           state.domainValuesCache.get(symbol)!.set(dim, values);
-          
+
           // Emit event so webview can be notified
           const columnName = `dim_${dim}`;
           this._onDomainValuesLoaded.fire({ uri, columnName, values });
@@ -227,8 +250,6 @@ export class GdxDocumentManager {
     let actualSql = sql.replace(/__GDX_FILE__/g, state.registrationName);
     // also remove any LIMIT/OFFSET clauses for export
     actualSql = actualSql.replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?/gi, '');
-    console.log('[GDX Document Manager] Exporting query after removing LIMIT/OFFSET:', actualSql);
-    console.log('[GDX Document Manager] Exporting query:', actualSql, '->', destinationPath);
     await this.duckdbService.exportQuery(actualSql, format, destinationPath);
   }
 

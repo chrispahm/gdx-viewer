@@ -37,7 +37,7 @@ function copyWasmFiles() {
 	// Copy WASM files
 	const wasmSrcDir = path.join(srcDir, 'v1.3.2/wasm_eh');
 	const wasmDestDir = path.join(destDir, 'v1.3.2/wasm_eh');
-	
+
 	const files = fs.readdirSync(wasmSrcDir);
 	for (const file of files) {
 		if (file.endsWith('.wasm')) {
@@ -60,6 +60,12 @@ function copyDuckdbWasm() {
 	fs.copyFileSync(
 		path.join(runtimeSrcDir, 'duckdb-eh.wasm'),
 		path.join(runtimeDestDir, 'duckdb-eh.wasm')
+	);
+
+	// Copy the static worker entry wrapper
+	fs.copyFileSync(
+		path.join(__dirname, 'src', 'duckdb', 'duckdb-worker-entry.cjs'),
+		path.join(runtimeDestDir, 'duckdb-worker-entry.cjs')
 	);
 
 	console.log('[build] Copied DuckDB wasm');
@@ -95,6 +101,29 @@ async function bundleDuckdbWorker() {
 	console.log('[build] Bundled DuckDB worker');
 }
 
+// Bundle web-worker package as a standalone module for proper Node.js Worker emulation
+async function bundleWebWorker() {
+	const outdir = path.join(__dirname, 'dist', 'duckdb');
+
+	fs.mkdirSync(outdir, { recursive: true });
+
+	await esbuild.build({
+		entryPoints: ['node_modules/web-worker/dist/node/index.cjs'],
+		bundle: true,
+		platform: 'node',
+		format: 'cjs',
+		outfile: path.join(outdir, 'web-worker.bundled.cjs'),
+		target: ['node18'],
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
+
+	console.log('[build] Bundled web-worker');
+}
+
 // Build CSS with Tailwind
 function buildCss() {
 	fs.mkdirSync(path.join(__dirname, 'dist/webview'), { recursive: true });
@@ -107,10 +136,10 @@ function buildCss() {
 
 async function main() {
 	// Copy WASM files first
-	copyWasmFiles();
+	// copyWasmFiles();
 	copyDuckdbWasm();
 	await bundleDuckdbWorker();
-	
+
 	// Build CSS
 	buildCss();
 
@@ -126,7 +155,7 @@ async function main() {
 		sourcesContent: false,
 		platform: 'node',
 		outfile: 'dist/extension.js',
-		external: ['vscode', 'web-worker'],
+		external: ['vscode'],
 		logLevel: 'silent',
 		plugins: [
 			esbuildProblemMatcherPlugin,
@@ -154,13 +183,34 @@ async function main() {
 		external: ['*.css'],
 	});
 
+	// Build server (runs in child process, bypasses extension host)
+	const serverCtx = await esbuild.context({
+		entryPoints: [
+			'src/server/serverEntry.ts'
+		],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/server.js',
+		external: ['bufferutil', 'utf-8-validate'],
+		logLevel: 'silent',
+		plugins: [
+			esbuildProblemMatcherPlugin,
+		],
+	});
+
 	if (watch) {
-		await Promise.all([extensionCtx.watch(), webviewCtx.watch()]);
+		await Promise.all([extensionCtx.watch(), webviewCtx.watch(), serverCtx.watch()]);
 	} else {
 		await extensionCtx.rebuild();
 		await webviewCtx.rebuild();
+		await serverCtx.rebuild();
 		await extensionCtx.dispose();
 		await webviewCtx.dispose();
+		await serverCtx.dispose();
 	}
 }
 

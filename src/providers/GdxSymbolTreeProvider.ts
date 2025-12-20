@@ -1,25 +1,18 @@
 import * as vscode from 'vscode';
 import { GdxSymbol } from '../duckdb/duckdbService';
-import { GdxDocumentManager, GdxDocumentState } from '../duckdb/gdxDocumentManager';
 
 export class GdxSymbolTreeProvider implements vscode.TreeDataProvider<GdxSymbolItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<GdxSymbolItem | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private currentDocument: GdxDocumentState | null = null;
+  private symbols: GdxSymbol[] = [];
 
-  constructor(private documentManager: GdxDocumentManager) {
-    // Listen for document changes
-    documentManager.onDocumentOpened(() => {
-      this._onDidChangeTreeData.fire(undefined);
-    });
-    documentManager.onDocumentClosed(() => {
-      this._onDidChangeTreeData.fire(undefined);
-    });
+  constructor() {
+    // No document manager dependency - symbols are set directly
   }
 
-  setCurrentDocument(document: GdxDocumentState | null): void {
-    this.currentDocument = document;
+  setSymbols(symbols: GdxSymbol[]): void {
+    this.symbols = symbols;
     this._onDidChangeTreeData.fire(undefined);
   }
 
@@ -32,11 +25,7 @@ export class GdxSymbolTreeProvider implements vscode.TreeDataProvider<GdxSymbolI
   }
 
   getChildren(): GdxSymbolItem[] {
-    if (!this.currentDocument) {
-      return [];
-    }
-
-    return this.currentDocument.symbols.map(symbol => new GdxSymbolItem(symbol));
+    return this.symbols.map(symbol => new GdxSymbolItem(symbol));
   }
 }
 

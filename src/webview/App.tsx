@@ -3,6 +3,7 @@ import { DataTable } from "./components/DataTable";
 import { SqlToolbar } from "./components/SqlToolbar";
 import { LoadingOverlay } from "./components/LoadingOverlay";
 import { type DisplayAttributes } from "./components/AttributesPanel";
+import { wsClient } from "./wsClient";
 
 interface GdxSymbol {
   name: string;
@@ -60,93 +61,91 @@ function buildSqlQuery(
   pageIndex: number
 ): string {
   let sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${symbolName}')`;
-  
+
   // Build WHERE clause from filters
   const whereClauses: string[] = [];
   for (const filter of filters) {
     const { columnName, filterValue } = filter;
-    
+
     if (isNumericFilter(filterValue)) {
       // Numeric filter with range and special values
       const conditions: string[] = [];
-      
+
       // Check if any special values are disabled (i.e., we need to filter them out)
-      const hasDisabledSpecialValues = 
-        !filterValue.showEPS || 
-        !filterValue.showNA || 
-        !filterValue.showPosInf || 
-        !filterValue.showNegInf || 
+      const hasDisabledSpecialValues =
+        !filterValue.showEPS ||
+        !filterValue.showNA ||
+        !filterValue.showPosInf ||
+        !filterValue.showNegInf ||
         !filterValue.showUNDF;
-      
-      // Handle numeric range
-      if (filterValue.min !== undefined || filterValue.max !== undefined) {
-        const rangeConditions: string[] = [];
-        if (filterValue.min !== undefined) {
-          rangeConditions.push(`"${columnName}" >= ${filterValue.min}`);
-        }
-        if (filterValue.max !== undefined) {
-          rangeConditions.push(`"${columnName}" <= ${filterValue.max}`);
-        }
-        const rangeClause = rangeConditions.join(' AND ');
-        
-        if (filterValue.exclude) {
-          // Exclude range - must be outside the range AND be a valid number
-          conditions.push(`("${columnName}" IS NOT NULL AND isfinite("${columnName}") AND NOT (${rangeClause}))`);
-        } else {
-          // Include range
-          conditions.push(`(${rangeClause})`);
-        }
+
+      // If ALL special values are shown and there's no range, skip this filter
+      if (!hasDisabledSpecialValues && filterValue.min === undefined && filterValue.max === undefined) {
+        continue;
       }
-      
-      // If not all special values are shown, we need to explicitly allow/disallow them
-      if (hasDisabledSpecialValues) {
-        const allowedSpecialConditions: string[] = [];
-        
-        // NULL values (EPS, NA, UNDF)
-        if (filterValue.showEPS || filterValue.showNA || filterValue.showUNDF) {
-          allowedSpecialConditions.push(`"${columnName}" IS NULL`);
-        }
-        
-        // Infinity values
-        if (filterValue.showPosInf) {
-          allowedSpecialConditions.push(`"${columnName}" = 'Infinity'::DOUBLE`);
-        }
-        if (filterValue.showNegInf) {
-          allowedSpecialConditions.push(`"${columnName}" = '-Infinity'::DOUBLE`);
-        }
-        
-        if (allowedSpecialConditions.length > 0) {
-          conditions.push(`(${allowedSpecialConditions.join(' OR ')})`);
-        }
+
+      // Build conditions for special values that should be EXCLUDED
+      const excludedSpecialValues: string[] = [];
+      if (!filterValue.showEPS) excludedSpecialValues.push('EPS');
+      if (!filterValue.showNA) excludedSpecialValues.push('NA');
+      if (!filterValue.showUNDF) excludedSpecialValues.push('UNDF');
+
+      // Handle infinity values
+      if (!filterValue.showPosInf) {
+        excludedSpecialValues.push('+INF');
+        conditions.push(`"${columnName}" != CAST('Infinity' AS DOUBLE)`);
       }
-      
+      if (!filterValue.showNegInf) {
+        excludedSpecialValues.push('-INF');
+        conditions.push(`"${columnName}" != CAST('-Infinity' AS DOUBLE)`);
+      }
+
+      // Exclude special string values
+      if (excludedSpecialValues.length > 0) {
+        const excludeList = excludedSpecialValues.map(v => `'${v}'`).join(', ');
+        conditions.push(`CAST("${columnName}" AS VARCHAR) NOT IN (${excludeList})`);
+      }
+
+      // Range conditions
+      if (filterValue.min !== undefined) {
+        conditions.push(`"${columnName}" >= ${filterValue.min}`);
+      }
+      if (filterValue.max !== undefined) {
+        conditions.push(`"${columnName}" <= ${filterValue.max}`);
+      }
+
       if (conditions.length > 0) {
-        whereClauses.push(`(${conditions.join(' OR ')})`);
+        let clause = conditions.join(' AND ');
+        if (filterValue.exclude) {
+          clause = `NOT (${clause})`;
+        }
+        whereClauses.push(`(${clause})`);
       }
     } else {
       // Text filter with selected values
-      if (filterValue.selectedValues.length > 0) {
-        const escapedValues = filterValue.selectedValues.map(v => `'${v.replace(/'/g, "''")}'`);
-        whereClauses.push(`"${columnName}" IN (${escapedValues.join(', ')})`);
+      if (filterValue.selectedValues.length === 0) {
+        continue; // No values selected means show all
       }
+      const valueList = filterValue.selectedValues.map(v => `'${v.replace(/'/g, "''")}'`).join(', ');
+      whereClauses.push(`"${columnName}" IN (${valueList})`);
     }
   }
-  
+
   if (whereClauses.length > 0) {
     sql += ` WHERE ${whereClauses.join(' AND ')}`;
   }
-  
-  // Build ORDER BY clause from sorts
+
+  // Add ORDER BY clause
   if (sorts.length > 0) {
-    const orderClauses = sorts.map(sort => 
+    const orderClauses = sorts.map(sort =>
       `"${sort.columnName}" ${sort.direction.toUpperCase()}`
     );
     sql += ` ORDER BY ${orderClauses.join(', ')}`;
   }
-  
+
   // Add pagination
   sql += ` LIMIT ${pageSize} OFFSET ${pageIndex * pageSize}`;
-  
+
   return sql;
 }
 
@@ -160,20 +159,6 @@ declare function acquireVsCodeApi(): VSCodeApi;
 
 const vscode = acquireVsCodeApi();
 
-let requestId = 0;
-const pendingRequests = new Map<
-  number,
-  { resolve: (value: unknown) => void; reject: (error: Error) => void }
->();
-
-function sendRequest<T>(type: string, payload: Record<string, unknown>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const id = ++requestId;
-    pendingRequests.set(id, { resolve: resolve as (value: unknown) => void, reject });
-    vscode.postMessage({ type, requestId: id, ...payload });
-  });
-}
-
 export function App() {
   const [symbols, setSymbols] = useState<GdxSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<GdxSymbol | null>(null);
@@ -184,11 +169,14 @@ export function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize, setPageSize] = useState(100);
+  const [pageSize, setPageSize] = useState(1000);
   const [totalRows, setTotalRows] = useState(0);
   const [filters, setFilters] = useState<ColumnFilter[]>([]);
   const [sorts, setSorts] = useState<ColumnSort[]>([]);
   const [domainValues, setDomainValues] = useState<Map<string, string[]>>(new Map());
+  const [connected, setConnected] = useState(false);
+  // Cache for count queries keyed by SQL string - avoids redundant expensive COUNT queries
+  const [countCache, setCountCache] = useState<Map<string, number>>(new Map());
   const [displayAttributes, setDisplayAttributes] = useState<DisplayAttributes>({
     squeezeDefaults: true,
     squeezeTrailingZeroes: false,
@@ -196,11 +184,20 @@ export function App() {
     precision: 6,
   });
 
+  // Execute query via WebSocket
   const executeQuery = useCallback(async (sql: string) => {
+    if (!connected) {
+      setError("Not connected to server");
+      return;
+    }
     setIsLoading(true);
     setError(null);
+
+    // Let React render the loading state before doing work
+    await new Promise(resolve => setTimeout(resolve, 0));
+
     try {
-      const result = await sendRequest<QueryResult>("executeQuery", { sql });
+      const result = await wsClient.request<QueryResult>("executeQuery", { sql });
       setResult(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query failed");
@@ -208,47 +205,95 @@ export function App() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [connected]);
 
   const executeQueryWithFiltersAndSorts = useCallback(
     async (symbol: GdxSymbol, newPageIndex: number, newPageSize: number, newFilters: ColumnFilter[], newSorts: ColumnSort[]) => {
+      // Set loading state first
+      setIsLoading(true);
+      setError(null);
+
+      // Use setTimeout to let React render the loading state before doing any work
+      await new Promise(resolve => setTimeout(resolve, 0));
+
       // Build the query for data
       const sql = buildSqlQuery(symbol.name, newFilters, newSorts, newPageSize, newPageIndex);
       setQuery(sql);
-      
-      // Also execute a count query to get total filtered rows
-      const countSql = buildSqlQuery(symbol.name, newFilters, [], 0, 0)
-        .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
-        .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
-      
-      setIsLoading(true);
-      setError(null);
-      
+
       try {
-        // Execute both queries in parallel
-        const [dataResult, countResult] = await Promise.all([
-          sendRequest<QueryResult>("executeQuery", { sql }),
-          sendRequest<QueryResult>("executeQuery", { sql: countSql })
-        ]);
-        
+        // Execute data query
+        const dataResult = await wsClient.request<QueryResult>("executeQuery", { sql });
         setResult(dataResult);
-        
-        // Update total rows based on count query
-        if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
-          const count = typeof countResult.rows[0].count === 'bigint' 
-            ? Number(countResult.rows[0].count)
-            : countResult.rows[0].count as number;
-          setTotalRows(count);
+        setIsLoading(false);
+
+        // Only run count query if there are active filters
+        // Without filters, we use symbol.recordCount from metadata (already set in handleSymbolSelect)
+        if (newFilters.length > 0) {
+          // Build count query (without ORDER BY, LIMIT, OFFSET since those don't affect count)
+          const countSql = buildSqlQuery(symbol.name, newFilters, [], 0, 0)
+            .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
+            .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
+
+          // Check count cache - only run count query if not cached
+          const cachedCount = countCache.get(countSql);
+          if (cachedCount !== undefined) {
+            setTotalRows(cachedCount);
+          } else {
+            // Run count query in background and cache result
+            wsClient.request<QueryResult>("executeQuery", { sql: countSql })
+              .then(countResult => {
+                if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
+                  const count = typeof countResult.rows[0].count === 'bigint'
+                    ? Number(countResult.rows[0].count)
+                    : countResult.rows[0].count as number;
+                  setTotalRows(count);
+                  // Cache the result
+                  setCountCache(prev => {
+                    const updated = new Map(prev);
+                    updated.set(countSql, count);
+                    return updated;
+                  });
+                }
+              })
+              .catch(err => console.error('[Count query error]', err));
+          }
+        } else {
+          // No filters - use metadata count
+          setTotalRows(symbol.recordCount);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
         setResult(null);
-      } finally {
         setIsLoading(false);
       }
     },
-    []
+    [countCache]
   );
+
+  const loadDomainValues = useCallback(async (symbol: GdxSymbol) => {
+    setIsFilterLoading(true);
+    try {
+      // Load domain values for each dimension
+      for (let dim = 1; dim <= symbol.dimensionCount; dim++) {
+        try {
+          const result = await wsClient.request<{ values: string[] }>("getDomainValues", {
+            symbol: symbol.name,
+            dimIndex: dim,
+          });
+          const columnName = `dim_${dim}`;
+          setDomainValues(prev => {
+            const updated = new Map(prev);
+            updated.set(columnName, result.values);
+            return updated;
+          });
+        } catch (err) {
+          console.error(`Error loading dimension ${dim}:`, err);
+        }
+      }
+    } finally {
+      setIsFilterLoading(false);
+    }
+  }, []);
 
   const handleFiltersChange = useCallback(
     async (newFilters: ColumnFilter[]) => {
@@ -264,7 +309,7 @@ export function App() {
     async (newSorts: ColumnSort[]) => {
       if (!selectedSymbol) return;
       setSorts(newSorts);
-      setPageIndex(0); // Reset to first page when sorts change
+      setPageIndex(0);
       await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, filters, newSorts);
     },
     [selectedSymbol, pageSize, filters, executeQueryWithFiltersAndSorts]
@@ -277,8 +322,10 @@ export function App() {
       setSorts([]);
       setPageIndex(0);
       await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, [], []);
+      // Reload domain values
+      loadDomainValues(selectedSymbol);
     },
-    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts]
+    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts, loadDomainValues]
   );
 
   const handleSymbolSelect = useCallback(
@@ -286,8 +333,10 @@ export function App() {
       setSelectedSymbol(symbol);
       setPageIndex(0);
       setTotalRows(symbol.recordCount);
-      setFilters([]); // Reset filters when changing symbols
-      setSorts([]); // Reset sorts when changing symbols
+      setFilters([]);
+      setSorts([]);
+      setDomainValues(new Map());
+      setCountCache(new Map()); // Clear count cache for new symbol
 
       // Build default query
       const sql = buildSqlQuery(symbol.name, [], [], pageSize, 0);
@@ -295,8 +344,11 @@ export function App() {
 
       vscode.postMessage({ type: "selectSymbol", symbol });
       await executeQuery(sql);
+
+      // Load domain values in background
+      loadDomainValues(symbol);
     },
-    [pageSize, executeQuery]
+    [pageSize, executeQuery, loadDomainValues]
   );
 
   const handlePageChange = useCallback(
@@ -324,8 +376,8 @@ export function App() {
       setIsExporting(true);
       setError(null);
       try {
-        // Build export query - strip LIMIT/OFFSET on backend
-        await sendRequest('exportData', { format, query });
+        // Request export path from extension (needs file picker)
+        vscode.postMessage({ type: 'exportData', format, query });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Export failed');
       } finally {
@@ -336,47 +388,62 @@ export function App() {
   );
 
   const handleCancelFilterLoading = useCallback(() => {
-    vscode.postMessage({ type: "cancelFilterLoading" });
+    // Cancel is now a no-op since loading happens via individual requests
+    setIsFilterLoading(false);
   }, []);
 
+  // Handle messages from extension
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
+    const handleMessage = async (event: MessageEvent) => {
       const message = event.data;
-      console.log('[GDX Webview] Received message:', message.type, message);
+      console.log('[GDX Webview] Received message:', message.type);
 
       switch (message.type) {
         case "init":
-          console.log('[GDX Webview] Init with symbols:', message.symbols?.length);
-          setSymbols(message.symbols);
-          setIsFilterLoading(message.isFilterLoading);
-          // Auto-select first symbol if available
-          if (message.symbols.length > 0) {
-            const firstSymbol = message.symbols[0];
-            setSelectedSymbol(firstSymbol);
-            setPageIndex(0);
-            setTotalRows(firstSymbol.recordCount);
-            setFilters([]); // Reset filters
-            setSorts([]); // Reset sorts
-            const sql = buildSqlQuery(firstSymbol.name, [], [], 100, 0);
-            setQuery(sql);
-            // Execute query for first symbol, then start filter loading
-            setIsLoading(true);
-            sendRequest<QueryResult>("executeQuery", { sql })
-              .then(result => {
-                console.log('[GDX Webview] Query result:', result);
-                setResult(result);
-                setIsLoading(false);
-                // Start filter loading AFTER data loading is complete
-                // Use setTimeout to ensure React state update happens first
-                setTimeout(() => {
-                  vscode.postMessage({ type: "startFilterLoading", symbol: firstSymbol.name });
-                }, 0);
-              })
-              .catch(err => {
+          // Connect to WebSocket server
+          console.log('[GDX Webview] Connecting to server on port', message.serverPort);
+          try {
+            await wsClient.connect(message.serverPort);
+            wsClient.setDocumentId(message.documentId);
+            setConnected(true);
+
+            // Open document on server
+            console.log('[GDX Webview] Opening document:', message.filePath);
+            const result = await wsClient.request<{ symbols: GdxSymbol[] }>("openDocument", {
+              filePath: message.filePath,
+              documentId: message.documentId,
+            });
+
+            const syms = result.symbols;
+            setSymbols(syms);
+
+            // Notify extension about symbols for tree view
+            vscode.postMessage({ type: "symbolsLoaded", symbols: syms });
+
+            // Auto-select first symbol
+            if (syms.length > 0) {
+              const firstSymbol = syms[0];
+              setSelectedSymbol(firstSymbol);
+              setTotalRows(firstSymbol.recordCount);
+              const sql = buildSqlQuery(firstSymbol.name, [], [], 1000, 0);
+              setQuery(sql);
+
+              setIsLoading(true);
+              try {
+                const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
+                setResult(queryResult);
+                // Load domain values in background
+                loadDomainValues(firstSymbol);
+              } catch (err) {
                 console.error('[GDX Webview] Query error:', err);
                 setError(err instanceof Error ? err.message : "Query failed");
+              } finally {
                 setIsLoading(false);
-              });
+              }
+            }
+          } catch (err) {
+            console.error('[GDX Webview] Failed to connect:', err);
+            setError(err instanceof Error ? err.message : "Failed to connect to server");
           }
           break;
 
@@ -384,53 +451,9 @@ export function App() {
           handleSymbolSelect(message.symbol);
           break;
 
-        case "queryResult":
-          console.log('[GDX Webview] Query result for request:', message.requestId);
-          if (pendingRequests.has(message.requestId)) {
-            pendingRequests.get(message.requestId)!.resolve(message.result);
-            pendingRequests.delete(message.requestId);
-          }
-          break;
-
-        case "queryError":
-          console.error('[GDX Webview] Query error:', message.error);
-          if (pendingRequests.has(message.requestId)) {
-            pendingRequests.get(message.requestId)!.reject(new Error(message.error));
-            pendingRequests.delete(message.requestId);
-          }
-          break;
-
-        case "exportResult":
-          if (pendingRequests.has(message.requestId)) {
-            pendingRequests.get(message.requestId)!.resolve(message.path);
-            pendingRequests.delete(message.requestId);
-          }
-          break;
-
-        case "exportError":
-          if (pendingRequests.has(message.requestId)) {
-            pendingRequests.get(message.requestId)!.reject(new Error(message.error));
-            pendingRequests.delete(message.requestId);
-          }
-          break;
-
-        case "filterLoadingChanged":
-          setIsFilterLoading(message.isLoading);
-          break;
-
-        case "domainValues":
-          console.log('[GDX Webview] Received domain values:', message.columnName);
-          if (message.values) {
-            setDomainValues(prev => {
-              const updated = new Map(prev);
-              updated.set(message.columnName, message.values);
-              return updated;
-            });
-          }
-          break;
-
-        case "domainValuesError":
-          console.error('[GDX Webview] Domain values error:', message.error);
+        case "exportPath":
+          // Extension provided export path, execute export on server
+          // TODO: Implement export via WebSocket
           break;
       }
     };
@@ -440,12 +463,12 @@ export function App() {
     vscode.postMessage({ type: "ready" });
 
     return () => window.removeEventListener("message", handleMessage);
-  }, []); // Remove handleSymbolSelect dependency to avoid re-registering
+  }, [loadDomainValues, handleSymbolSelect]);
 
   return (
-    <div style={{ 
-      display: 'flex', 
-      flexDirection: 'column', 
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
       height: '100vh',
       backgroundColor: 'var(--vscode-editor-background)',
       color: 'var(--vscode-editor-foreground)'
@@ -458,6 +481,8 @@ export function App() {
         onAttributesChange={setDisplayAttributes}
         onExport={handleExport}
         isExporting={isExporting}
+        hasActiveFilters={filters.length > 0}
+        onResetFilters={handleResetFilters}
       />
 
       {error && (
@@ -508,6 +533,7 @@ export function App() {
             onFiltersChange={handleFiltersChange}
             onSortsChange={handleSortsChange}
             domainValues={domainValues}
+            dimensionCount={selectedSymbol?.dimensionCount ?? 0}
           />
         ) : !isLoading && !selectedSymbol ? (
           <div style={{
@@ -517,9 +543,11 @@ export function App() {
             height: '100%',
             color: 'var(--vscode-descriptionForeground)'
           }}>
-            {symbols.length > 0
-              ? "Select a symbol from the sidebar to view data"
-              : "Loading symbols..."}
+            {connected
+              ? (symbols.length > 0
+                ? "Select a symbol from the sidebar to view data"
+                : "Loading symbols...")
+              : "Connecting to server..."}
           </div>
         ) : null}
 
