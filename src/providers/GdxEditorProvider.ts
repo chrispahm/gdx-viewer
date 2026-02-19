@@ -39,6 +39,10 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     return this.documents.get(uri.toString())?.symbols;
   }
 
+  getFilePathForDocument(uri: vscode.Uri): string | undefined {
+    return this.documents.get(uri.toString())?.filePath;
+  }
+
   async openCustomDocument(uri: vscode.Uri): Promise<GdxDocument> {
     console.log('[GDX Extension] Opening custom document:', uri.toString());
     const filePath = uri.fsPath;

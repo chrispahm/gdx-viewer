@@ -7,6 +7,7 @@
 
 import * as http from 'node:http';
 import * as fs from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DuckdbService, GdxSymbol, QueryResult } from '../duckdb/duckdbService';
 
@@ -25,9 +26,13 @@ interface ServerResponse {
 }
 
 interface DocumentState {
-  filePath: string;
+  source: string;
   registrationName: string;
   symbols: GdxSymbol[];
+}
+
+interface GdxServerOptions {
+	allowRemoteSourceLoading: boolean;
 }
 
 export class GdxServer {
@@ -36,10 +41,15 @@ export class GdxServer {
   private duckdbService: DuckdbService;
   private documents = new Map<string, DocumentState>();
   private port: number = 0;
+  private options: GdxServerOptions;
   // Request queue to serialize all DuckDB operations (prevents concurrent query issues)
   private requestQueue: Promise<void> = Promise.resolve();
 
-  constructor(extensionPath: string) {
+  constructor(extensionPath: string, options?: Partial<GdxServerOptions>) {
+    this.options = {
+      allowRemoteSourceLoading: false,
+      ...options,
+    };
     this.duckdbService = new DuckdbService(extensionPath);
     this.server = http.createServer();
     this.wss = new WebSocketServer({ server: this.server });
@@ -95,8 +105,11 @@ export class GdxServer {
   private async handleRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case 'openDocument': {
-        const filePath = params.filePath as string;
+        const source = (params.source as string | undefined) ?? (params.filePath as string | undefined);
         const documentId = params.documentId as string;
+        if (!source) {
+          throw new Error('Missing source path or URL');
+        }
 
         // Check if already open
         if (this.documents.has(documentId)) {
@@ -104,12 +117,12 @@ export class GdxServer {
           return { symbols: doc.symbols };
         }
 
-        // Read file and register with DuckDB
-        const bytes = await fs.readFile(filePath);
-        const registrationName = await this.duckdbService.registerGdxFile(filePath, new Uint8Array(bytes));
+        // Read source and register with DuckDB
+        const bytes = await this.readSource(source);
+        const registrationName = await this.duckdbService.registerGdxFile(source, bytes);
         const symbols = await this.duckdbService.getSymbols(registrationName);
 
-        this.documents.set(documentId, { filePath, registrationName, symbols });
+        this.documents.set(documentId, { source, registrationName, symbols });
 
         return { symbols };
       }
@@ -124,7 +137,7 @@ export class GdxServer {
         }
 
         // Replace placeholder with actual registration name
-        const actualSql = sql.replace(/__GDX_FILE__/g, doc.registrationName);
+        const actualSql = this.rewriteSqlForDocument(sql, doc);
         const result = await this.duckdbService.executeQuery(actualSql);
         return result;
       }
@@ -172,6 +185,48 @@ export class GdxServer {
       default:
         throw new Error(`Unknown method: ${method}`);
     }
+  }
+
+  private rewriteSqlForDocument(sql: string, doc: DocumentState): string {
+    let rewrittenSql = sql.replace(/__GDX_FILE__/g, doc.registrationName);
+    rewrittenSql = rewrittenSql.split(doc.source).join(doc.registrationName);
+    return rewrittenSql;
+  }
+
+  private async readSource(source: string): Promise<Uint8Array> {
+    if (this.isHttpSource(source)) {
+      if (!this.options.allowRemoteSourceLoading) {
+        throw new Error('Remote source loading is disabled. Enable gdxViewer.allowRemoteSourceLoading to use HTTP/HTTPS sources.');
+      }
+
+      const response = await fetch(source);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch remote source (${response.status} ${response.statusText}): ${source}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      return new Uint8Array(arrayBuffer);
+    }
+
+    const localPath = this.toLocalPath(source);
+    const bytes = await fs.readFile(localPath);
+    return new Uint8Array(bytes);
+  }
+
+  private isHttpSource(source: string): boolean {
+    try {
+      const uri = new URL(source);
+      return uri.protocol === 'http:' || uri.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  private toLocalPath(source: string): string {
+    if (source.startsWith('file://')) {
+      return fileURLToPath(source);
+    }
+    return source;
   }
 
   async stop(): Promise<void> {

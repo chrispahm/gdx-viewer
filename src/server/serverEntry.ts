@@ -7,14 +7,30 @@
 
 import { GdxServer } from './gdxServer';
 
+interface ServerStartupOptions {
+  allowRemoteSourceLoading?: boolean;
+}
+
 async function main() {
   const extensionPath = process.argv[2];
+  const optionsArg = process.argv[3];
   if (!extensionPath) {
     console.error('[GDX Server] Missing extension path argument');
     process.exit(1);
   }
 
-  const server = new GdxServer(extensionPath);
+  let startupOptions: ServerStartupOptions = {};
+  if (optionsArg) {
+    try {
+      startupOptions = JSON.parse(optionsArg) as ServerStartupOptions;
+    } catch (error) {
+      console.warn('[GDX Server] Failed to parse startup options:', error);
+    }
+  }
+
+  const server = new GdxServer(extensionPath, {
+    allowRemoteSourceLoading: startupOptions.allowRemoteSourceLoading ?? false,
+  });
 
   try {
     const port = await server.start();

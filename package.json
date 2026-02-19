@@ -27,7 +27,7 @@
   ],
   "icon": "media/icon.png",
   "activationEvents": [
-    "onCustomEditor:gdxViewer.gdxEditor"
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -49,6 +49,7 @@
         {
           "id": "gdxSymbols",
           "name": "GDX Symbols",
+          "icon": "media/icon.png",
           "when": "gdxViewer.hasActiveDocument"
         }
       ]
@@ -60,9 +61,168 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically load filter values when opening a GDX file"
+        },
+        "gdxViewer.allowRemoteSourceLoading": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow loading GDX sources from remote HTTP/HTTPS URLs for language model tools"
         }
       }
     },
+    "languageModelTools": [
+      {
+        "name": "gdx_list_symbols",
+        "displayName": "List GDX Symbols",
+        "modelDescription": "List all symbols in a GDX source (set, parameter, variable, equation) with type, dimensions, and record counts. Use this first to discover available symbol names before querying data. When source is omitted, it uses the currently active .gdx document in the editor.",
+        "userDescription": "List symbols in a GDX file",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gdx-symbols",
+        "icon": {
+          "id": "symbol-namespace"
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Absolute local file path or HTTP/HTTPS URL of a GDX file. Optional: if omitted, the active .gdx editor document is used."
+            }
+          }
+        },
+        "tags": [
+          "gdx",
+          "duckdb",
+          "data-discovery"
+        ]
+      },
+      {
+        "name": "gdx_preview_symbol",
+        "displayName": "Preview GDX Symbol",
+        "modelDescription": "Preview rows from a specific symbol in a GDX source. Uses DuckDB read_gdx under the hood and returns tabular data with columns and rows. Use this for quick inspection before writing larger SQL queries.",
+        "userDescription": "Preview data rows for one GDX symbol",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gdx-preview",
+        "icon": {
+          "id": "table"
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name to preview from the GDX source."
+            },
+            "source": {
+              "type": "string",
+              "description": "Absolute local file path or HTTP/HTTPS URL of a GDX file. Optional: if omitted, the active .gdx editor document is used."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum number of rows to return. Optional, defaults to 100."
+            },
+            "offset": {
+              "type": "number",
+              "description": "Optional row offset for pagination."
+            }
+          },
+          "required": [
+            "symbol"
+          ]
+        },
+        "tags": [
+          "gdx",
+          "duckdb",
+          "preview"
+        ]
+      },
+      {
+        "name": "gdx_domain_values",
+        "displayName": "Get GDX Domain Values",
+        "modelDescription": "Get distinct values for one symbol dimension to build filters and explore domain members. Useful for understanding coordinates before building SQL WHERE predicates.",
+        "userDescription": "Get distinct values of a symbol dimension",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gdx-domain",
+        "icon": {
+          "id": "list-selection"
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "type": "string",
+              "description": "Symbol name in the GDX source."
+            },
+            "dimIndex": {
+              "type": "number",
+              "description": "1-based domain dimension index to inspect."
+            },
+            "source": {
+              "type": "string",
+              "description": "Absolute local file path or HTTP/HTTPS URL of a GDX file. Optional: if omitted, the active .gdx editor document is used."
+            },
+            "dimensionFilters": {
+              "type": "object",
+              "description": "Optional filters for other dimensions. Keys are dimension names and values are arrays of allowed members.",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "symbol",
+            "dimIndex"
+          ]
+        },
+        "tags": [
+          "gdx",
+          "duckdb",
+          "filters"
+        ]
+      },
+      {
+        "name": "gdx_query",
+        "displayName": "Run GDX SQL Query",
+        "modelDescription": "Run SQL against a loaded GDX source via DuckDB. Supports standard DuckDB SQL and read_gdx/gdx_symbols functions. Use '__GDX_FILE__' in SQL for the loaded source placeholder. If source is omitted, the active .gdx editor document is used.",
+        "userDescription": "Execute SQL on GDX data",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gdx-sql",
+        "icon": {
+          "id": "database"
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sql": {
+              "type": "string",
+              "description": "DuckDB SQL query to execute."
+            },
+            "source": {
+              "type": "string",
+              "description": "Absolute local file path or HTTP/HTTPS URL of a GDX file. Optional: if omitted, the active .gdx editor document is used."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Optional result row limit applied to output truncation."
+            },
+            "offset": {
+              "type": "number",
+              "description": "Optional result row offset applied to output truncation."
+            }
+          },
+          "required": [
+            "sql"
+          ]
+        },
+        "tags": [
+          "gdx",
+          "duckdb",
+          "sql"
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "gdxViewer.selectSymbol",

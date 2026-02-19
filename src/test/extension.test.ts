@@ -40,6 +40,12 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(autoLoadFilters, true, 'autoLoadFilters should default to true');
 	});
 
+	test('Should have configuration setting for allowRemoteSourceLoading', () => {
+		const config = vscode.workspace.getConfiguration('gdxViewer');
+		const allowRemoteSourceLoading = config.get<boolean>('allowRemoteSourceLoading');
+		assert.strictEqual(allowRemoteSourceLoading, false, 'allowRemoteSourceLoading should default to false');
+	});
+
 	test('Test GDX file should exist', async () => {
 		const uri = vscode.Uri.file(testGdxPath);
 		try {

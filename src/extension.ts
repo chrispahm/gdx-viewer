@@ -4,18 +4,19 @@ import { fork, ChildProcess } from 'node:child_process';
 import { GdxEditorProvider } from './providers/GdxEditorProvider';
 import { GdxSymbolTreeProvider } from './providers/GdxSymbolTreeProvider';
 import { GdxSymbol } from './duckdb/duckdbService';
+import { registerGdxLanguageModelTools } from './lm/gdxTools';
 
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
 let activeDocumentUri: vscode.Uri | null = null;
 
-async function startServer(extensionPath: string): Promise<number> {
+async function startServer(extensionPath: string, allowRemoteSourceLoading: boolean): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const serverPath = path.join(extensionPath, 'dist', 'server.js');
 
 		// Use empty execArgv to prevent inheriting VS Code's debugger/inspector settings
 		// which can cause conflicts with worker threads in the child process
-		serverProcess = fork(serverPath, [extensionPath], {
+		serverProcess = fork(serverPath, [extensionPath, JSON.stringify({ allowRemoteSourceLoading })], {
 			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 			execArgv: [], // Clear inherited node flags like --inspect
 		});
@@ -63,9 +64,12 @@ export async function activate(context: vscode.ExtensionContext) {
 	console.log('GDX Viewer extension is activating...');
 
 	try {
+		const config = vscode.workspace.getConfiguration('gdxViewer');
+		const allowRemoteSourceLoading = config.get<boolean>('allowRemoteSourceLoading', false);
+
 		// Start server in child process (bypasses extension host limitations)
 		console.log('[GDX] Starting GDX server...');
-		serverPort = await startServer(context.extensionPath);
+		serverPort = await startServer(context.extensionPath, allowRemoteSourceLoading);
 		console.log(`[GDX] Server started on port ${serverPort}`);
 
 		// Create tree view provider (minimal, no DuckDB access needed)
@@ -106,6 +110,16 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		);
+
+		registerGdxLanguageModelTools(context, {
+			getServerPort: () => serverPort,
+			getActiveSource: () => {
+				if (!activeDocumentUri) {
+					return undefined;
+				}
+				return editorProvider.getFilePathForDocument(activeDocumentUri);
+			},
+		});
 
 		context.subscriptions.push(
 			treeView,
