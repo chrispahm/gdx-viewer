@@ -107,14 +107,19 @@ export class GdxServer {
       case 'openDocument': {
         const source = (params.source as string | undefined) ?? (params.filePath as string | undefined);
         const documentId = params.documentId as string;
+        const forceReload = Boolean(params.forceReload);
         if (!source) {
           throw new Error('Missing source path or URL');
         }
 
-        // Check if already open
-        if (this.documents.has(documentId)) {
-          const doc = this.documents.get(documentId)!;
-          return { symbols: doc.symbols };
+        const existing = this.documents.get(documentId);
+        if (existing && !forceReload) {
+          return { symbols: existing.symbols };
+        }
+
+        if (existing) {
+          await this.duckdbService.unregisterFile(existing.registrationName);
+          this.documents.delete(documentId);
         }
 
         // Read source and register with DuckDB

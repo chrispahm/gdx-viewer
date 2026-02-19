@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { DataTable } from "./components/DataTable";
 import { SqlToolbar } from "./components/SqlToolbar";
 import { LoadingOverlay } from "./components/LoadingOverlay";
@@ -165,9 +165,11 @@ export function App() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(1000);
   const [totalRows, setTotalRows] = useState(0);
@@ -177,12 +179,15 @@ export function App() {
   const [connected, setConnected] = useState(false);
   // Cache for count queries keyed by SQL string - avoids redundant expensive COUNT queries
   const [countCache, setCountCache] = useState<Map<string, number>>(new Map());
+  const [documentSource, setDocumentSource] = useState<{ filePath: string; documentId: string } | null>(null);
   const [displayAttributes, setDisplayAttributes] = useState<DisplayAttributes>({
     squeezeDefaults: true,
     squeezeTrailingZeroes: false,
     format: 'g-format',
     precision: 6,
   });
+  const initializedDocumentIdRef = useRef<string | null>(null);
+  const connectedRef = useRef(false);
 
   // Execute query via WebSocket
   const executeQuery = useCallback(async (sql: string) => {
@@ -208,9 +213,20 @@ export function App() {
   }, [connected]);
 
   const executeQueryWithFiltersAndSorts = useCallback(
-    async (symbol: GdxSymbol, newPageIndex: number, newPageSize: number, newFilters: ColumnFilter[], newSorts: ColumnSort[]) => {
+    async (
+      symbol: GdxSymbol,
+      newPageIndex: number,
+      newPageSize: number,
+      newFilters: ColumnFilter[],
+      newSorts: ColumnSort[],
+      options?: { background?: boolean }
+    ) => {
+      const isBackgroundRefresh = options?.background ?? false;
+
       // Set loading state first
-      setIsLoading(true);
+      if (!isBackgroundRefresh) {
+        setIsLoading(true);
+      }
       setError(null);
 
       // Use setTimeout to let React render the loading state before doing any work
@@ -224,7 +240,9 @@ export function App() {
         // Execute data query
         const dataResult = await wsClient.request<QueryResult>("executeQuery", { sql });
         setResult(dataResult);
-        setIsLoading(false);
+        if (!isBackgroundRefresh) {
+          setIsLoading(false);
+        }
 
         // Only run count query if there are active filters
         // Without filters, we use symbol.recordCount from metadata (already set in handleSymbolSelect)
@@ -263,8 +281,10 @@ export function App() {
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
-        setResult(null);
-        setIsLoading(false);
+        if (!isBackgroundRefresh) {
+          setResult(null);
+          setIsLoading(false);
+        }
       }
     },
     [countCache]
@@ -294,6 +314,91 @@ export function App() {
       setIsFilterLoading(false);
     }
   }, []);
+
+  const refreshCurrentDocument = useCallback(async () => {
+    if (!connected || !documentSource) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    setRefreshNotice(null);
+    setError(null);
+
+    try {
+      const refreshed = await wsClient.request<{ symbols: GdxSymbol[] }>("openDocument", {
+        filePath: documentSource.filePath,
+        documentId: documentSource.documentId,
+        forceReload: true,
+      });
+
+      const nextSymbols = refreshed.symbols;
+      setSymbols(nextSymbols);
+      vscode.postMessage({ type: "symbolsLoaded", symbols: nextSymbols });
+
+      if (nextSymbols.length === 0) {
+        setSelectedSymbol(null);
+        setResult(null);
+        setTotalRows(0);
+        setDomainValues(new Map());
+        setCountCache(new Map());
+        setRefreshNotice("Source updated, but no symbols are available.");
+        return;
+      }
+
+      let nextSymbol = selectedSymbol
+        ? nextSymbols.find(symbol => symbol.name === selectedSymbol.name) ?? null
+        : null;
+
+      let nextFilters = filters;
+      let nextSorts = sorts;
+      let nextPageIndex = pageIndex;
+
+      if (!nextSymbol) {
+        nextSymbol = nextSymbols[0];
+        nextFilters = [];
+        nextSorts = [];
+        nextPageIndex = 0;
+
+        setFilters([]);
+        setSorts([]);
+        setPageIndex(0);
+
+        if (selectedSymbol) {
+          setRefreshNotice(`Symbol '${selectedSymbol.name}' is no longer available. Showing '${nextSymbol.name}'.`);
+        }
+      }
+
+      setSelectedSymbol(nextSymbol);
+      setTotalRows(nextSymbol.recordCount);
+      setDomainValues(new Map());
+      setCountCache(new Map());
+
+      await executeQueryWithFiltersAndSorts(
+        nextSymbol,
+        nextPageIndex,
+        pageSize,
+        nextFilters,
+        nextSorts,
+        { background: true }
+      );
+
+      loadDomainValues(nextSymbol);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to refresh document");
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [
+    connected,
+    documentSource,
+    selectedSymbol,
+    filters,
+    sorts,
+    pageIndex,
+    pageSize,
+    executeQueryWithFiltersAndSorts,
+    loadDomainValues,
+  ]);
 
   const handleFiltersChange = useCallback(
     async (newFilters: ColumnFilter[]) => {
@@ -392,23 +497,40 @@ export function App() {
     setIsFilterLoading(false);
   }, []);
 
+  const loadDomainValuesRef = useRef(loadDomainValues);
+  const handleSymbolSelectRef = useRef(handleSymbolSelect);
+  const refreshCurrentDocumentRef = useRef(refreshCurrentDocument);
+
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
+
+  useEffect(() => {
+    loadDomainValuesRef.current = loadDomainValues;
+    handleSymbolSelectRef.current = handleSymbolSelect;
+    refreshCurrentDocumentRef.current = refreshCurrentDocument;
+  }, [loadDomainValues, handleSymbolSelect, refreshCurrentDocument]);
+
   // Handle messages from extension
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
       const message = event.data;
-      console.log('[GDX Webview] Received message:', message.type);
 
       switch (message.type) {
         case "init":
+          if (initializedDocumentIdRef.current === message.documentId && connectedRef.current) {
+            return;
+          }
+
           // Connect to WebSocket server
-          console.log('[GDX Webview] Connecting to server on port', message.serverPort);
           try {
             await wsClient.connect(message.serverPort);
             wsClient.setDocumentId(message.documentId);
             setConnected(true);
+            initializedDocumentIdRef.current = message.documentId;
+            setDocumentSource({ filePath: message.filePath, documentId: message.documentId });
 
             // Open document on server
-            console.log('[GDX Webview] Opening document:', message.filePath);
             const result = await wsClient.request<{ symbols: GdxSymbol[] }>("openDocument", {
               filePath: message.filePath,
               documentId: message.documentId,
@@ -433,22 +555,25 @@ export function App() {
                 const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
                 setResult(queryResult);
                 // Load domain values in background
-                loadDomainValues(firstSymbol);
+                loadDomainValuesRef.current(firstSymbol);
               } catch (err) {
-                console.error('[GDX Webview] Query error:', err);
                 setError(err instanceof Error ? err.message : "Query failed");
               } finally {
                 setIsLoading(false);
               }
             }
           } catch (err) {
-            console.error('[GDX Webview] Failed to connect:', err);
+            initializedDocumentIdRef.current = null;
             setError(err instanceof Error ? err.message : "Failed to connect to server");
           }
           break;
 
         case "selectSymbol":
-          handleSymbolSelect(message.symbol);
+          handleSymbolSelectRef.current(message.symbol);
+          break;
+
+        case "gdxFileChanged":
+          refreshCurrentDocumentRef.current();
           break;
 
         case "exportPath":
@@ -459,11 +584,10 @@ export function App() {
     };
 
     window.addEventListener("message", handleMessage);
-    console.log('[GDX Webview] Sending ready message');
     vscode.postMessage({ type: "ready" });
 
     return () => window.removeEventListener("message", handleMessage);
-  }, [loadDomainValues, handleSymbolSelect]);
+  }, []);
 
   return (
     <div style={{
@@ -477,6 +601,7 @@ export function App() {
         defaultQuery={query}
         onExecute={executeQuery}
         isLoading={isLoading}
+        isRefreshing={isRefreshing}
         displayAttributes={displayAttributes}
         onAttributesChange={setDisplayAttributes}
         onExport={handleExport}
@@ -517,6 +642,36 @@ export function App() {
         </div>
       )}
 
+      {refreshNotice && (
+        <div style={{
+          padding: '8px 12px',
+          backgroundColor: 'var(--vscode-editorInfo-background)',
+          color: 'var(--vscode-editorInfo-foreground)',
+          borderBottom: '1px solid var(--vscode-panel-border, transparent)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px'
+        }}>
+          <span>{refreshNotice}</span>
+          <button
+            onClick={() => setRefreshNotice(null)}
+            style={{
+              padding: '2px 8px',
+              backgroundColor: 'transparent',
+              color: 'var(--vscode-editorInfo-foreground)',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: 'pointer',
+              fontFamily: 'var(--vscode-font-family)',
+              fontSize: 'var(--vscode-font-size)',
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
         {result ? (
           <DataTable
@@ -554,6 +709,7 @@ export function App() {
         <LoadingOverlay
           isLoading={isLoading}
           isFilterLoading={isFilterLoading}
+          isRefreshing={isRefreshing}
           onCancelFilterLoading={handleCancelFilterLoading}
         />
       </div>

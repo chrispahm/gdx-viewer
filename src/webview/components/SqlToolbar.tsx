@@ -5,6 +5,7 @@ interface SqlToolbarProps {
   defaultQuery: string;
   onExecute: (sql: string) => void;
   isLoading: boolean;
+  isRefreshing?: boolean;
   displayAttributes: DisplayAttributes;
   onAttributesChange: (attributes: DisplayAttributes) => void;
   onExport: (format: 'csv' | 'parquet' | 'excel', query: string) => void;
@@ -17,6 +18,7 @@ export function SqlToolbar({
   defaultQuery,
   onExecute,
   isLoading,
+  isRefreshing = false,
   displayAttributes,
   onAttributesChange,
   onExport,
@@ -44,11 +46,17 @@ export function SqlToolbar({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isRefreshing) {
+      return;
+    }
     onExecute(query);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      if (isRefreshing) {
+        return;
+      }
       onExecute(query);
     }
     if (e.key === "Escape") {
@@ -76,7 +84,7 @@ export function SqlToolbar({
         {hasActiveFilters && onResetFilters && (
           <button
             onClick={onResetFilters}
-            disabled={isLoading}
+            disabled={isLoading || isRefreshing}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -86,15 +94,15 @@ export function SqlToolbar({
               color: 'var(--vscode-button-secondaryForeground)',
               border: 'none',
               borderRadius: '3px',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
+              cursor: isLoading || isRefreshing ? 'not-allowed' : 'pointer',
               fontFamily: 'var(--vscode-font-family)',
               fontSize: 'var(--vscode-font-size)',
               fontWeight: 600,
-              opacity: isLoading ? 0.5 : 1,
+              opacity: isLoading || isRefreshing ? 0.5 : 1,
               transition: 'background-color 0.15s'
             }}
             onMouseEnter={(e) => {
-              if (!isLoading) {
+              if (!isLoading && !isRefreshing) {
                 e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryHoverBackground)';
               }
             }}
@@ -284,15 +292,15 @@ export function SqlToolbar({
               color: 'var(--vscode-button-foreground)',
               border: 'none',
               borderRadius: '3px',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
+              cursor: isLoading || isRefreshing ? 'not-allowed' : 'pointer',
               fontFamily: 'var(--vscode-font-family)',
               fontSize: 'var(--vscode-font-size)',
               fontWeight: 500,
-              opacity: isLoading ? 0.5 : 1,
+              opacity: isLoading || isRefreshing ? 0.5 : 1,
               whiteSpace: 'nowrap'
             }}
             onMouseEnter={(e) => {
-              if (!isLoading) {
+              if (!isLoading && !isRefreshing) {
                 e.currentTarget.style.backgroundColor = 'var(--vscode-button-hoverBackground)';
               }
             }}
@@ -300,7 +308,7 @@ export function SqlToolbar({
               e.currentTarget.style.backgroundColor = 'var(--vscode-button-background)';
             }}
           >
-            {isLoading ? "Running..." : "Run"}
+            {isLoading || isRefreshing ? "Running..." : "Run"}
           </button>
         </form>
       )}

@@ -102,6 +102,12 @@ export class DuckdbService {
 
     // Warmup query to trigger any lazy initialization
     await this.conn.query('SELECT 1');
+    // get version for logging
+    const result = await this.conn.query(`SELECT extension_name, extension_version FROM duckdb_extensions()`);
+    console.log('[DuckDB] Loaded extensions:\n');
+    for (const row of result.toArray() as Record<string, unknown>[]) {
+      console.log(`- ${row.extension_name}: ${row.extension_version}\n`);
+    }
   }
 
   async registerGdxFile(uriString: string, bytes: Uint8Array): Promise<string> {

@@ -1,6 +1,7 @@
 interface LoadingOverlayProps {
   isLoading: boolean;
   isFilterLoading: boolean;
+  isRefreshing?: boolean;
   onCancelFilterLoading: () => void;
 }
 
@@ -47,6 +48,22 @@ const styles = {
     fontFamily: 'var(--vscode-font-family)',
     fontSize: 'var(--vscode-font-size)',
   },
+  refreshBanner: {
+    position: 'fixed' as const,
+    top: '16px',
+    right: '16px',
+    backgroundColor: 'var(--vscode-editorWidget-background)',
+    color: 'var(--vscode-foreground)',
+    padding: '8px 16px',
+    borderRadius: '4px',
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    zIndex: 50,
+    fontFamily: 'var(--vscode-font-family)',
+    fontSize: 'var(--vscode-font-size)',
+  },
   cancelButton: {
     padding: '2px 8px',
     backgroundColor: 'transparent',
@@ -62,9 +79,10 @@ const styles = {
 export function LoadingOverlay({
   isLoading,
   isFilterLoading,
+  isRefreshing = false,
   onCancelFilterLoading,
 }: LoadingOverlayProps) {
-  if (!isLoading && !isFilterLoading) {
+  if (!isLoading && !isFilterLoading && !isRefreshing) {
     return null;
   }
 
@@ -99,6 +117,12 @@ export function LoadingOverlay({
           >
             Cancel
           </button>
+        </div>
+      )}
+      {isRefreshing && (
+        <div style={styles.refreshBanner}>
+          <div style={styles.spinner} />
+          <span>Refreshing data...</span>
         </div>
       )}
     </>

@@ -43,10 +43,23 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     return this.documents.get(uri.toString())?.filePath;
   }
 
+  hasOpenDocument(uri: vscode.Uri): boolean {
+    return this.documents.has(uri.toString());
+  }
+
+  notifySourceFileChanged(uri: vscode.Uri): void {
+    const webview = this.webviews.get(uri.toString());
+    if (!webview) {
+      return;
+    }
+
+    webview.webview.postMessage({
+      type: 'gdxFileChanged',
+    });
+  }
+
   async openCustomDocument(uri: vscode.Uri): Promise<GdxDocument> {
-    console.log('[GDX Extension] Opening custom document:', uri.toString());
     const filePath = uri.fsPath;
-    console.log('[GDX Extension] File path:', filePath);
     const doc = new GdxDocumentImpl(uri, filePath);
     this.documents.set(uri.toString(), doc);
     return doc;
@@ -70,11 +83,9 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
 
     // Handle messages from webview
     webviewPanel.webview.onDidReceiveMessage(async (message) => {
-      console.log('[GDX Extension] Received message from webview:', message.type);
       switch (message.type) {
         case 'ready':
           // Send init with server connection info and file path
-          console.log('[GDX Extension] Sending init with server port', this.serverPort);
           webviewPanel.webview.postMessage({
             type: 'init',
             serverPort: this.serverPort,
@@ -184,9 +195,6 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     );
 
     const nonce = getNonce();
-
-    console.log('[GDX Extension] Webview script URI:', scriptUri.toString());
-    console.log('[GDX Extension] Webview style URI:', styleUri.toString());
 
     // CSP needs to allow WebSocket connections to localhost
     return `<!DOCTYPE html>

@@ -8,7 +8,7 @@
     "type": "git",
     "url": "https://github.com/chrispahm/gdx-viewer"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "engines": {
     "vscode": "^1.106.1"
   },
@@ -27,7 +27,11 @@
   ],
   "icon": "media/icon.png",
   "activationEvents": [
-    "onStartupFinished"
+    "workspaceContains:*.gdx",
+    "onLanguageModelTool:gdx_list_symbols",
+    "onLanguageModelTool:gdx_preview_symbol",
+    "onLanguageModelTool:gdx_domain_values",
+    "onLanguageModelTool:gdx_query"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -74,12 +78,9 @@
         "name": "gdx_list_symbols",
         "displayName": "List GDX Symbols",
         "modelDescription": "List all symbols in a GDX source (set, parameter, variable, equation) with type, dimensions, and record counts. Use this first to discover available symbol names before querying data. When source is omitted, it uses the currently active .gdx document in the editor.",
-        "userDescription": "List symbols in a GDX file",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gdx-symbols",
-        "icon": {
-          "id": "symbol-namespace"
-        },
+        "icon": "$(symbol-namespace)",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -99,12 +100,9 @@
         "name": "gdx_preview_symbol",
         "displayName": "Preview GDX Symbol",
         "modelDescription": "Preview rows from a specific symbol in a GDX source. Uses DuckDB read_gdx under the hood and returns tabular data with columns and rows. Use this for quick inspection before writing larger SQL queries.",
-        "userDescription": "Preview data rows for one GDX symbol",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gdx-preview",
-        "icon": {
-          "id": "table"
-        },
+        "icon": "$(table)",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -139,12 +137,9 @@
         "name": "gdx_domain_values",
         "displayName": "Get GDX Domain Values",
         "modelDescription": "Get distinct values for one symbol dimension to build filters and explore domain members. Useful for understanding coordinates before building SQL WHERE predicates.",
-        "userDescription": "Get distinct values of a symbol dimension",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gdx-domain",
-        "icon": {
-          "id": "list-selection"
-        },
+        "icon": "$(list-selection)",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -186,12 +181,9 @@
         "name": "gdx_query",
         "displayName": "Run GDX SQL Query",
         "modelDescription": "Run SQL against a loaded GDX source via DuckDB. Supports standard DuckDB SQL and read_gdx/gdx_symbols functions. Use '__GDX_FILE__' in SQL for the loaded source placeholder. If source is omitted, the active .gdx editor document is used.",
-        "userDescription": "Execute SQL on GDX data",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gdx-sql",
-        "icon": {
-          "id": "database"
-        },
+        "icon": "$(database)",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -245,7 +237,7 @@
     "test": "vscode-test"
   },
   "dependencies": {
-    "@duckdb/duckdb-wasm": "^1.30.0",
+    "@duckdb/duckdb-wasm": "^1.33.1-dev18.0",
     "@radix-ui/react-slot": "^1.1.0",
     "@tanstack/react-table": "^8.20.5",
     "@types/ws": "^8.18.1",

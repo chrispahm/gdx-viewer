@@ -10,6 +10,7 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"args": [
+				"--enable-proposed-api=chrispahm.gdx-viewer",
 				"--extensionDevelopmentPath=${workspaceFolder}"
 			],
 			"outFiles": [

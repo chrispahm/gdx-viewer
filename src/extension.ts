@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { stat } from 'node:fs/promises';
 import { fork, ChildProcess } from 'node:child_process';
 import { GdxEditorProvider } from './providers/GdxEditorProvider';
 import { GdxSymbolTreeProvider } from './providers/GdxSymbolTreeProvider';
@@ -19,6 +20,11 @@ async function startServer(extensionPath: string, allowRemoteSourceLoading: bool
 		serverProcess = fork(serverPath, [extensionPath, JSON.stringify({ allowRemoteSourceLoading })], {
 			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 			execArgv: [], // Clear inherited node flags like --inspect
+		});
+
+		// Capture stdout for informational logs
+		serverProcess.stdout?.on('data', (data: Buffer) => {
+			console.log('[GDX Server]', data.toString().trim());
 		});
 
 		// Capture stderr for error logging
@@ -62,6 +68,10 @@ function stopServer(): void {
 
 export async function activate(context: vscode.ExtensionContext) {
 	console.log('GDX Viewer extension is activating...');
+	const contributedTools = ((context.extension.packageJSON as {
+		contributes?: { languageModelTools?: Array<{ name?: string }> };
+	})?.contributes?.languageModelTools ?? []).map(tool => tool.name ?? '<unnamed>');
+	console.log('[GDX] Contributed language model tools:', contributedTools.join(', '));
 
 	try {
 		const config = vscode.workspace.getConfiguration('gdxViewer');
@@ -80,6 +90,65 @@ export async function activate(context: vscode.ExtensionContext) {
 
 		// Create editor provider with server port
 		const editorProvider = new GdxEditorProvider(context, serverPort);
+
+		const recentInternalSaves = new Map<string, number>();
+		const pendingRefreshTimers = new Map<string, NodeJS.Timeout>();
+		const lastObservedMtimeMs = new Map<string, number>();
+		const INTERNAL_SAVE_WINDOW_MS = 1500;
+		const FILE_CHANGE_DEBOUNCE_MS = 500;
+
+		const queueRefreshForUri = (uri: vscode.Uri) => {
+			const key = uri.toString();
+			const now = Date.now();
+			const lastInternalSave = recentInternalSaves.get(key);
+			if (lastInternalSave && now - lastInternalSave < INTERNAL_SAVE_WINDOW_MS) {
+				return;
+			}
+
+			if (!editorProvider.hasOpenDocument(uri)) {
+				return;
+			}
+
+			const existingTimer = pendingRefreshTimers.get(key);
+			if (existingTimer) {
+				clearTimeout(existingTimer);
+			}
+
+			const timer = setTimeout(async () => {
+				pendingRefreshTimers.delete(key);
+
+				let mtimeMs: number | null = null;
+				try {
+					const fileStats = await stat(uri.fsPath);
+					mtimeMs = fileStats.mtimeMs;
+				} catch {
+					// If file stats fail (e.g. transient access issue), fall back to notifying.
+				}
+
+				if (mtimeMs !== null) {
+					const lastSeenMtime = lastObservedMtimeMs.get(key);
+					if (lastSeenMtime !== undefined && mtimeMs <= lastSeenMtime) {
+						return;
+					}
+					lastObservedMtimeMs.set(key, mtimeMs);
+				}
+
+				if (editorProvider.hasOpenDocument(uri)) {
+					editorProvider.notifySourceFileChanged(uri);
+				}
+			}, FILE_CHANGE_DEBOUNCE_MS);
+
+			pendingRefreshTimers.set(key, timer);
+		};
+
+		const saveSubscription = vscode.workspace.onDidSaveTextDocument((document) => {
+			if (document.uri.fsPath.toLowerCase().endsWith('.gdx')) {
+				recentInternalSaves.set(document.uri.toString(), Date.now());
+			}
+		});
+
+		const gdxFileWatcher = vscode.workspace.createFileSystemWatcher('**/*.gdx');
+		gdxFileWatcher.onDidChange((uri) => queueRefreshForUri(uri));
 
 		// Track active document from editor provider
 		editorProvider.onDidChangeActiveDocument((uri) => {
@@ -111,20 +180,42 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		);
 
-		registerGdxLanguageModelTools(context, {
-			getServerPort: () => serverPort,
-			getActiveSource: () => {
-				if (!activeDocumentUri) {
-					return undefined;
-				}
-				return editorProvider.getFilePathForDocument(activeDocumentUri);
-			},
-		});
+		const lmApi = (vscode as unknown as { lm?: { tools?: ReadonlyArray<{ name: string }> } }).lm;
+		if (lmApi) {
+			try {
+				registerGdxLanguageModelTools(context, {
+					getServerPort: () => serverPort,
+					getActiveSource: () => {
+						if (!activeDocumentUri) {
+							return undefined;
+						}
+						return editorProvider.getFilePathForDocument(activeDocumentUri);
+					},
+				});
+				console.log('[GDX] Language model tools registered');
+			} catch (error) {
+				console.error('[GDX] Failed to register language model tools:', error);
+			}
+		} else {
+			console.warn('[GDX] Language model tools API is unavailable in this VS Code build');
+		}
 
 		context.subscriptions.push(
 			treeView,
 			editorRegistration,
 			selectSymbolCommand,
+			saveSubscription,
+			gdxFileWatcher,
+			{
+				dispose: () => {
+					for (const timer of pendingRefreshTimers.values()) {
+						clearTimeout(timer);
+					}
+					pendingRefreshTimers.clear();
+					recentInternalSaves.clear();
+					lastObservedMtimeMs.clear();
+				},
+			},
 			{ dispose: () => stopServer() }
 		);
 

@@ -26,30 +26,6 @@ const esbuildProblemMatcherPlugin = {
 	},
 };
 
-// Copy WASM files
-function copyWasmFiles() {
-	const srcDir = path.join(__dirname, 'src/duckdb-gdx/repository');
-	const destDir = path.join(__dirname, 'dist/wasm');
-
-	// Create dest directories
-	fs.mkdirSync(path.join(destDir, 'v1.3.2/wasm_eh'), { recursive: true });
-
-	// Copy WASM files
-	const wasmSrcDir = path.join(srcDir, 'v1.3.2/wasm_eh');
-	const wasmDestDir = path.join(destDir, 'v1.3.2/wasm_eh');
-
-	const files = fs.readdirSync(wasmSrcDir);
-	for (const file of files) {
-		if (file.endsWith('.wasm')) {
-			fs.copyFileSync(
-				path.join(wasmSrcDir, file),
-				path.join(wasmDestDir, file)
-			);
-		}
-	}
-	console.log('[build] Copied WASM files');
-}
-
 // Copy DuckDB WASM payload used by the bundled worker
 function copyDuckdbWasm() {
 	const runtimeSrcDir = path.join(__dirname, 'node_modules', '@duckdb', 'duckdb-wasm', 'dist');
