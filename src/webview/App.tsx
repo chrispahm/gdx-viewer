@@ -47,6 +47,14 @@ export interface ColumnSort {
   direction: 'asc' | 'desc';
 }
 
+interface LocatorMessage {
+  type: 'applyLocator';
+  symbolName?: string;
+  filters?: ColumnFilter[];
+  targetColumn?: string;
+  focusDimensions?: Record<string, string>;
+}
+
 // Helper to check if a filter is numeric
 function isNumericFilter(filter: FilterValue): filter is NumericFilterState {
   return 'exclude' in filter;
@@ -149,6 +157,23 @@ function buildSqlQuery(
   return sql;
 }
 
+function buildDimensionRowKey(row: Record<string, unknown>, dimensionCount: number): string | null {
+  if (dimensionCount <= 0) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  for (let dim = 1; dim <= dimensionCount; dim++) {
+    const column = `dim_${dim}`;
+    const value = row[column];
+    if (value === undefined || value === null) {
+      return null;
+    }
+    parts.push(`${column}=${String(value)}`);
+  }
+  return parts.join('|');
+}
+
 interface VSCodeApi {
   postMessage(message: unknown): void;
   getState(): unknown;
@@ -188,6 +213,9 @@ export function App() {
   });
   const initializedDocumentIdRef = useRef<string | null>(null);
   const connectedRef = useRef(false);
+  const pendingLocatorRef = useRef<LocatorMessage | null>(null);
+  const [highlightedRowKey, setHighlightedRowKey] = useState<string | null>(null);
+  const [highlightedColumnName, setHighlightedColumnName] = useState<string | null>(null);
 
   // Execute query via WebSocket
   const executeQuery = useCallback(async (sql: string) => {
@@ -220,7 +248,7 @@ export function App() {
       newFilters: ColumnFilter[],
       newSorts: ColumnSort[],
       options?: { background?: boolean }
-    ) => {
+    ): Promise<QueryResult | null> => {
       const isBackgroundRefresh = options?.background ?? false;
 
       // Set loading state first
@@ -279,12 +307,16 @@ export function App() {
           // No filters - use metadata count
           setTotalRows(symbol.recordCount);
         }
+
+        return dataResult;
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
         if (!isBackgroundRefresh) {
           setResult(null);
           setIsLoading(false);
         }
+
+        return null;
       }
     },
     [countCache]
@@ -332,6 +364,7 @@ export function App() {
       });
 
       const nextSymbols = refreshed.symbols;
+      console.log(`[GDX] Refreshed document ${documentSource.filePath}: ${nextSymbols.length} symbols`);
       setSymbols(nextSymbols);
       vscode.postMessage({ type: "symbolsLoaded", symbols: nextSymbols });
 
@@ -442,6 +475,8 @@ export function App() {
       setSorts([]);
       setDomainValues(new Map());
       setCountCache(new Map()); // Clear count cache for new symbol
+      setHighlightedRowKey(null);
+      setHighlightedColumnName(null);
 
       // Build default query
       const sql = buildSqlQuery(symbol.name, [], [], pageSize, 0);
@@ -496,6 +531,99 @@ export function App() {
     // Cancel is now a no-op since loading happens via individual requests
     setIsFilterLoading(false);
   }, []);
+
+  const applyLocator = useCallback(async (
+    locator: LocatorMessage,
+    availableSymbols: GdxSymbol[] = symbols,
+    currentSelectedSymbol: GdxSymbol | null = selectedSymbol
+  ) => {
+    if (!connectedRef.current) {
+      setRefreshNotice("Waiting for server connection before revealing location.");
+      pendingLocatorRef.current = locator;
+      return;
+    }
+
+    if (availableSymbols.length === 0 && !currentSelectedSymbol) {
+      pendingLocatorRef.current = locator;
+      return;
+    }
+
+    const symbolName = locator.symbolName?.trim();
+    const symbol = symbolName
+      ? availableSymbols.find(candidate => candidate.name === symbolName)
+      : currentSelectedSymbol;
+
+    if (!symbol) {
+      setRefreshNotice(symbolName
+        ? `Symbol '${symbolName}' not found in this document.`
+        : "No symbol selected to reveal location.");
+      return;
+    }
+
+    const locatorFilters = locator.filters ?? [];
+    setRefreshNotice(null);
+    setSelectedSymbol(symbol);
+    setFilters(locatorFilters);
+    setSorts([]);
+    setPageIndex(0);
+    setTotalRows(symbol.recordCount);
+    setDomainValues(new Map());
+    setCountCache(new Map());
+    setHighlightedColumnName(locator.targetColumn?.trim() || null);
+
+    const queryResult = await executeQueryWithFiltersAndSorts(symbol, 0, pageSize, locatorFilters, []);
+    loadDomainValuesRef.current(symbol);
+
+    const targetDimensions = locator.focusDimensions ?? Object.fromEntries(
+      locatorFilters
+        .filter(filter => /^dim_\d+$/i.test(filter.columnName))
+        .map(filter => {
+          const selectedValues = 'selectedValues' in filter.filterValue
+            ? filter.filterValue.selectedValues
+            : [];
+          return [filter.columnName, selectedValues.length === 1 ? selectedValues[0] : ''];
+        })
+        .filter((entry): entry is [string, string] => entry[1].length > 0)
+    );
+
+    const targetDimensionEntries = Object.keys(targetDimensions).length > 0
+      ? Object.entries(targetDimensions)
+        .sort(([left], [right]) => {
+          const leftMatch = left.match(/^dim_(\d+)$/i);
+          const rightMatch = right.match(/^dim_(\d+)$/i);
+          if (leftMatch && rightMatch) {
+            return Number(leftMatch[1]) - Number(rightMatch[1]);
+          }
+          return left.localeCompare(right);
+        })
+      : [];
+
+    if (!queryResult) {
+      setHighlightedRowKey(null);
+      return;
+    }
+
+    if (targetDimensionEntries.length === 0) {
+      if (queryResult.rows.length === 1) {
+        const inferredKey = buildDimensionRowKey(queryResult.rows[0], symbol.dimensionCount);
+        setHighlightedRowKey(inferredKey);
+      } else {
+        setHighlightedRowKey(null);
+      }
+      return;
+    }
+
+    const matchedRow = queryResult.rows.find(row =>
+      targetDimensionEntries.every(([column, value]) => String(row[column] ?? '') === value)
+    );
+
+    if (matchedRow) {
+      setHighlightedRowKey(buildDimensionRowKey(matchedRow, symbol.dimensionCount));
+    } else {
+      setHighlightedRowKey(null);
+      setRefreshNotice('No exact match found for the requested location with current filters.');
+    }
+  }, [symbols, selectedSymbol, executeQueryWithFiltersAndSorts, pageSize]);
 
   const loadDomainValuesRef = useRef(loadDomainValues);
   const handleSymbolSelectRef = useRef(handleSymbolSelect);
@@ -556,6 +684,12 @@ export function App() {
                 setResult(queryResult);
                 // Load domain values in background
                 loadDomainValuesRef.current(firstSymbol);
+
+                if (pendingLocatorRef.current) {
+                  const pending = pendingLocatorRef.current;
+                  pendingLocatorRef.current = null;
+                  await applyLocator(pending, syms, firstSymbol);
+                }
               } catch (err) {
                 setError(err instanceof Error ? err.message : "Query failed");
               } finally {
@@ -580,6 +714,12 @@ export function App() {
           // Extension provided export path, execute export on server
           // TODO: Implement export via WebSocket
           break;
+
+        case "applyLocator": {
+          const locator = message as LocatorMessage;
+          await applyLocator(locator);
+          break;
+        }
       }
     };
 
@@ -587,7 +727,7 @@ export function App() {
     vscode.postMessage({ type: "ready" });
 
     return () => window.removeEventListener("message", handleMessage);
-  }, []);
+  }, [applyLocator]);
 
   return (
     <div style={{
@@ -689,6 +829,8 @@ export function App() {
             onSortsChange={handleSortsChange}
             domainValues={domainValues}
             dimensionCount={selectedSymbol?.dimensionCount ?? 0}
+            highlightedRowKey={highlightedRowKey}
+            highlightedColumnName={highlightedColumnName}
           />
         ) : !isLoading && !selectedSymbol ? (
           <div style={{

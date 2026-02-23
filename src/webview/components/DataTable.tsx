@@ -26,6 +26,8 @@ interface DataTableProps {
   onSortsChange: (sorts: ColumnSort[]) => void;
   domainValues: Map<string, string[]>;
   dimensionCount: number;
+  highlightedRowKey?: string | null;
+  highlightedColumnName?: string | null;
 }
 const SUPERSCRIPTS = {
   '0': '⁰',
@@ -312,6 +314,8 @@ export function DataTable({
   onSortsChange,
   domainValues,
   dimensionCount,
+  highlightedRowKey,
+  highlightedColumnName,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
@@ -522,6 +526,23 @@ export function DataTable({
   const canPreviousPage = pageIndex > 0;
   const canNextPage = pageIndex < totalPages - 1;
 
+  const buildDimensionRowKey = useCallback((row: Record<string, unknown>): string | null => {
+    if (dimensionCount <= 0) {
+      return null;
+    }
+
+    const parts: string[] = [];
+    for (let dim = 1; dim <= dimensionCount; dim++) {
+      const columnName = `dim_${dim}`;
+      const value = row[columnName];
+      if (value === undefined || value === null) {
+        return null;
+      }
+      parts.push(`${columnName}=${String(value)}`);
+    }
+    return parts.join('|');
+  }, [dimensionCount]);
+
   return (
     <div style={styles.container}>
       <div style={styles.tableWrapper}>
@@ -545,28 +566,52 @@ export function DataTable({
           <tbody>
             {table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row, idx) => (
-                <tr
-                  key={row.id}
-                  style={{
-                    ...styles.tr,
-                    backgroundColor: idx % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = 'var(--vscode-list-activeSelectionBackground)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = idx % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)';
-                  }}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} style={styles.td}>
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext()
-                      )}
-                    </td>
-                  ))}
-                </tr>
+                (() => {
+                  const rowKey = buildDimensionRowKey(row.original);
+                  const isHighlightedRow = !!highlightedRowKey && rowKey === highlightedRowKey;
+                  const baseRowBackground = isHighlightedRow
+                    ? 'var(--vscode-list-activeSelectionBackground)'
+                    : (idx % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)');
+
+                  return (
+                    <tr
+                      key={row.id}
+                      style={{
+                        ...styles.tr,
+                        backgroundColor: baseRowBackground,
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = 'var(--vscode-list-activeSelectionBackground)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = baseRowBackground;
+                      }}
+                    >
+                      {row.getVisibleCells().map((cell) => {
+                        const isHighlightedCell = isHighlightedRow && highlightedColumnName === cell.column.id;
+                        return (
+                          <td
+                            key={cell.id}
+                            style={{
+                              ...styles.td,
+                              ...(isHighlightedCell
+                                ? {
+                                  outline: '1px solid var(--vscode-focusBorder)',
+                                  backgroundColor: 'var(--vscode-list-activeSelectionBackground)',
+                                }
+                                : {}),
+                            }}
+                          >
+                            {flexRender(
+                              cell.column.columnDef.cell,
+                              cell.getContext()
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })()
               ))
             ) : (
               <tr>

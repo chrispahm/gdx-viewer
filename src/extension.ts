@@ -7,13 +7,71 @@ import { GdxSymbolTreeProvider } from './providers/GdxSymbolTreeProvider';
 import { GdxSymbol } from './duckdb/duckdbService';
 import { registerGdxLanguageModelTools } from './lm/gdxTools';
 
+interface RevealLocationInput {
+	source?: string;
+	symbol?: string;
+	dimensionFilters?: Record<string, string | string[]>;
+	targetColumn?: string;
+	focusDimensions?: Record<string, string>;
+}
+
+interface LocatorMessageFilter {
+	columnName: string;
+	filterValue: {
+		selectedValues: string[];
+	};
+}
+
+interface LocatorMessage {
+	type: 'applyLocator';
+	symbolName?: string;
+	filters: LocatorMessageFilter[];
+	targetColumn?: string;
+	focusDimensions?: Record<string, string>;
+}
+
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
 let activeDocumentUri: vscode.Uri | null = null;
 
 async function startServer(extensionPath: string, allowRemoteSourceLoading: boolean): Promise<number> {
+	const serverPath = path.join(extensionPath, 'dist', 'server.js');
+
+	try {
+		await stat(serverPath);
+	} catch {
+		throw new Error(`Server entry not found at ${serverPath}. Please run npm run compile.`);
+	}
+
 	return new Promise((resolve, reject) => {
-		const serverPath = path.join(extensionPath, 'dist', 'server.js');
+		const maxLogChars = 8000;
+		let stdoutLog = '';
+		let stderrLog = '';
+		let settled = false;
+
+		const appendRolling = (current: string, chunk: string): string => {
+			const combined = current + chunk;
+			return combined.length > maxLogChars ? combined.slice(-maxLogChars) : combined;
+		};
+
+		const diagnosticsOutput = (): string => {
+			const safeStdout = stdoutLog.trim() || '(empty)';
+			const safeStderr = stderrLog.trim() || '(empty)';
+			return `
+Child stdout:
+${safeStdout}
+Child stderr:
+${safeStderr}`;
+		};
+
+		const rejectIfPending = (message: string): void => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(startupTimeout);
+			reject(new Error(`${message}${diagnosticsOutput()}`));
+		};
 
 		// Use empty execArgv to prevent inheriting VS Code's debugger/inspector settings
 		// which can cause conflicts with worker threads in the child process
@@ -22,38 +80,40 @@ async function startServer(extensionPath: string, allowRemoteSourceLoading: bool
 			execArgv: [], // Clear inherited node flags like --inspect
 		});
 
-		// Capture stdout for informational logs
 		serverProcess.stdout?.on('data', (data: Buffer) => {
-			console.log('[GDX Server]', data.toString().trim());
+			const output = data.toString();
+			stdoutLog = appendRolling(stdoutLog, output);
+			console.log('[GDX Server]', output.trim());
 		});
 
-		// Capture stderr for error logging
 		serverProcess.stderr?.on('data', (data: Buffer) => {
-			console.error('[GDX Server]', data.toString().trim());
+			const output = data.toString();
+			stderrLog = appendRolling(stderrLog, output);
+			console.error('[GDX Server]', output.trim());
 		});
 
 		serverProcess.on('message', (msg: { type: string; port?: number }) => {
-			if (msg.type === 'ready' && msg.port) {
+			if (msg.type === 'ready' && msg.port && !settled) {
+				settled = true;
+				clearTimeout(startupTimeout);
 				resolve(msg.port);
 			}
 		});
 
 		serverProcess.on('error', (err) => {
 			console.error('[GDX] Server process error:', err);
-			reject(err);
+			rejectIfPending(`Server process error before ready: ${err instanceof Error ? err.message : String(err)}\n`);
 		});
 
-		serverProcess.on('exit', (code) => {
+		serverProcess.on('exit', (code, signal) => {
 			serverProcess = null;
 			serverPort = null;
+			rejectIfPending(`Server process exited before ready (code: ${code ?? 'null'}, signal: ${signal ?? 'null'}).\n`);
 		});
 
-		// Timeout after 30 seconds
-		setTimeout(() => {
-			if (!serverPort) {
-				serverProcess?.kill();
-				reject(new Error('Server startup timeout'));
-			}
+		const startupTimeout = setTimeout(() => {
+			serverProcess?.kill();
+			rejectIfPending('Server startup timeout: ready message was not received within 30000ms.\n');
 		}, 30000);
 	});
 }
@@ -135,6 +195,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
 				if (editorProvider.hasOpenDocument(uri)) {
 					editorProvider.notifySourceFileChanged(uri);
+					const symbols = editorProvider.getSymbolsForDocument(uri);
+					console.log(`[GDX] Refreshed symbols for ${uri.fsPath}: ${symbols?.length ?? 0} symbols`);
+					treeProvider.setSymbols(symbols || []);
 				}
 			}, FILE_CHANGE_DEBOUNCE_MS);
 
@@ -180,6 +243,71 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		);
 
+		const revealLocationInEditor = async (input: RevealLocationInput): Promise<unknown> => {
+			const source = input.source?.trim() || (
+				activeDocumentUri
+					? editorProvider.getFilePathForDocument(activeDocumentUri)
+					: undefined
+			);
+
+			if (!source) {
+				throw new Error('No GDX source provided. Pass source or open a .gdx file and make it active in the editor.');
+			}
+
+			if (/^https?:\/\//i.test(source)) {
+				throw new Error('Reveal location only supports local .gdx files in the editor.');
+			}
+
+			const sourceUri = vscode.Uri.file(source);
+			await vscode.commands.executeCommand('vscode.openWith', sourceUri, GdxEditorProvider.viewType);
+
+			const filters: LocatorMessageFilter[] = [];
+			if (input.dimensionFilters) {
+				for (const [columnName, rawValues] of Object.entries(input.dimensionFilters)) {
+					const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+					const selectedValues = values
+						.map(value => String(value).trim())
+						.filter(value => value.length > 0);
+					if (columnName.trim() && selectedValues.length > 0) {
+						filters.push({
+							columnName: columnName.trim(),
+							filterValue: { selectedValues },
+						});
+					}
+				}
+			}
+
+			const focusDimensions = input.focusDimensions
+				? Object.fromEntries(
+					Object.entries(input.focusDimensions)
+						.map(([key, value]) => [key.trim(), String(value).trim()])
+						.filter(([key, value]) => key.length > 0 && value.length > 0)
+				)
+				: undefined;
+
+			const locatorMessage: LocatorMessage = {
+				type: 'applyLocator',
+				symbolName: input.symbol?.trim() || undefined,
+				filters,
+				targetColumn: input.targetColumn?.trim() || undefined,
+				focusDimensions,
+			};
+
+			editorProvider.applyLocatorInWebview(sourceUri, locatorMessage);
+
+			return {
+				source,
+				symbol: locatorMessage.symbolName ?? null,
+				filtersApplied: filters.length,
+				highlightColumn: locatorMessage.targetColumn ?? null,
+			};
+		};
+
+		const revealLocationCommand = vscode.commands.registerCommand(
+			'gdxViewer.revealLocation',
+			revealLocationInEditor
+		);
+
 		const lmApi = (vscode as unknown as { lm?: { tools?: ReadonlyArray<{ name: string }> } }).lm;
 		if (lmApi) {
 			try {
@@ -191,6 +319,7 @@ export async function activate(context: vscode.ExtensionContext) {
 						}
 						return editorProvider.getFilePathForDocument(activeDocumentUri);
 					},
+					revealLocationInEditor,
 				});
 				console.log('[GDX] Language model tools registered');
 			} catch (error) {
@@ -204,6 +333,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			treeView,
 			editorRegistration,
 			selectSymbolCommand,
+			revealLocationCommand,
 			saveSubscription,
 			gdxFileWatcher,
 			{

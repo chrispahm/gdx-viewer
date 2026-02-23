@@ -5,9 +5,10 @@ import * as vscode from 'vscode';
 
 suite('Extension Test Suite', () => {
 	const testGdxPath = path.join(__dirname, '..', '..', 'src', 'test', 'transport.gdx');
+	const extension = vscode.extensions.getExtension('chrispahm.gdx-viewer')
+		?? vscode.extensions.all.find(ext => ext.packageJSON?.name === 'gdx-viewer');
 
 	test('Extension should be present', () => {
-		const extension = vscode.extensions.getExtension('undefined_publisher.gdx-viewer');
 		assert.ok(extension, 'Extension should be installed');
 	});
 
@@ -25,7 +26,6 @@ suite('Extension Test Suite', () => {
 
 	test('Should register tree view', () => {
 		// The tree view should be registered under the explorer view
-		const extension = vscode.extensions.getExtension('undefined_publisher.gdx-viewer');
 		const views = extension?.packageJSON?.contributes?.views;
 		// Check that the explorer array contains the gdxSymbols view
 		const explorerViews = views?.explorer;

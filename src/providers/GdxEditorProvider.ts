@@ -7,6 +7,21 @@ interface GdxDocument extends vscode.CustomDocument {
   symbols: GdxSymbol[];
 }
 
+interface LocatorMessageFilter {
+  columnName: string;
+  filterValue: {
+    selectedValues: string[];
+  };
+}
+
+interface LocatorMessage {
+  type: 'applyLocator';
+  symbolName?: string;
+  filters: LocatorMessageFilter[];
+  targetColumn?: string;
+  focusDimensions?: Record<string, string>;
+}
+
 class GdxDocumentImpl implements GdxDocument {
   public symbols: GdxSymbol[] = [];
 
@@ -27,6 +42,7 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
   private documents = new Map<string, GdxDocumentImpl>();
   private _onDidSelectSymbol = new vscode.EventEmitter<{ uri: vscode.Uri; symbol: GdxSymbol }>();
   private _onDidChangeActiveDocument = new vscode.EventEmitter<vscode.Uri | null>();
+  private pendingLocatorMessages = new Map<string, LocatorMessage>();
   readonly onDidSelectSymbol = this._onDidSelectSymbol.event;
   readonly onDidChangeActiveDocument = this._onDidChangeActiveDocument.event;
 
@@ -56,6 +72,17 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     webview.webview.postMessage({
       type: 'gdxFileChanged',
     });
+  }
+
+  applyLocatorInWebview(uri: vscode.Uri, locator: LocatorMessage): void {
+    const key = uri.toString();
+    const webview = this.webviews.get(key);
+    if (webview) {
+      webview.webview.postMessage(locator);
+      return;
+    }
+
+    this.pendingLocatorMessages.set(key, locator);
   }
 
   async openCustomDocument(uri: vscode.Uri): Promise<GdxDocument> {
@@ -92,6 +119,12 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
             filePath: document.filePath,
             documentId: uri.toString(),
           });
+
+          const pendingLocator = this.pendingLocatorMessages.get(uri.toString());
+          if (pendingLocator) {
+            webviewPanel.webview.postMessage(pendingLocator);
+            this.pendingLocatorMessages.delete(uri.toString());
+          }
           break;
 
         case 'symbolsLoaded':
@@ -153,6 +186,7 @@ export class GdxEditorProvider implements vscode.CustomReadonlyEditorProvider<Gd
     webviewPanel.onDidDispose(() => {
       this.webviews.delete(uri.toString());
       this.documents.delete(uri.toString());
+      this.pendingLocatorMessages.delete(uri.toString());
       this._onDidChangeActiveDocument.fire(null);
       // Hide symbols view when no GDX document is active
       if (this.webviews.size === 0) {

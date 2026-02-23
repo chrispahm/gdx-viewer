@@ -115,8 +115,9 @@ export class DuckdbService {
       throw new Error('DuckDB not initialized');
     }
 
-    // Create unique registration name based on URI
-    const hash = this.hashString(uriString);
+    // Create unique registration name based on URI + random
+    const randomSuffix = Math.random().toString(16).slice(2, 8);
+    const hash = this.hashString(uriString + randomSuffix);
     const registrationName = `gdx_${hash}.gdx`;
 
     await this.db.registerFileBuffer(registrationName, bytes);

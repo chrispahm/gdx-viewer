@@ -8,7 +8,7 @@
     "type": "git",
     "url": "https://github.com/chrispahm/gdx-viewer"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "engines": {
     "vscode": "^1.106.1"
   },
@@ -31,7 +31,8 @@
     "onLanguageModelTool:gdx_list_symbols",
     "onLanguageModelTool:gdx_preview_symbol",
     "onLanguageModelTool:gdx_domain_values",
-    "onLanguageModelTool:gdx_query"
+    "onLanguageModelTool:gdx_query",
+    "onLanguageModelTool:gdx_reveal_location"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -213,12 +214,70 @@
           "duckdb",
           "sql"
         ]
+      },
+      {
+        "name": "gdx_reveal_location",
+        "displayName": "Reveal Location in GDX Editor",
+        "modelDescription": "Open or reuse a GDX editor, optionally switch symbol, pre-apply UI filters (like WHERE clauses), and highlight where a value is located for the user.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gdx-reveal",
+        "icon": "$(search)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Absolute local file path of a GDX file. Optional: if omitted, the active .gdx editor document is used."
+            },
+            "symbol": {
+              "type": "string",
+              "description": "Optional symbol name to open before applying filters."
+            },
+            "dimensionFilters": {
+              "type": "object",
+              "description": "Optional dimension filters to preselect in the UI. Keys should be dimension columns such as dim_1, dim_2. Values can be a single string or an array of strings.",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              }
+            },
+            "targetColumn": {
+              "type": "string",
+              "description": "Optional column to emphasize as the target cell (for example: value, level, marginal)."
+            },
+            "focusDimensions": {
+              "type": "object",
+              "description": "Optional exact row focus dimensions for highlighting. Keys should be dimension columns and values should be single members.",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "tags": [
+          "gdx",
+          "navigation",
+          "highlight"
+        ]
       }
     ],
     "commands": [
       {
         "command": "gdxViewer.selectSymbol",
         "title": "Select Symbol"
+      },
+      {
+        "command": "gdxViewer.revealLocation",
+        "title": "Reveal Location in GDX Viewer"
       }
     ]
   },

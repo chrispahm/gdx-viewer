@@ -7,6 +7,7 @@ const TOOL_NAMES = {
 	previewSymbol: 'gdx_preview_symbol',
 	domainValues: 'gdx_domain_values',
 	query: 'gdx_query',
+	revealLocation: 'gdx_reveal_location',
 } as const;
 
 const DEFAULT_LIMIT = 100;
@@ -37,6 +38,14 @@ interface QueryInput {
 	offset?: number;
 }
 
+interface RevealLocationInput {
+	source?: string;
+	symbol?: string;
+	dimensionFilters?: Record<string, string | string[]>;
+	targetColumn?: string;
+	focusDimensions?: Record<string, string>;
+}
+
 interface OpenDocumentResult {
 	symbols: GdxSymbol[];
 }
@@ -56,6 +65,7 @@ interface FormattedQueryResult {
 interface GdxToolDeps {
 	getServerPort: () => number | null;
 	getActiveSource: () => string | undefined;
+	revealLocationInEditor: (input: RevealLocationInput) => Promise<unknown>;
 }
 
 class GdxToolRuntime {
@@ -146,6 +156,10 @@ class GdxToolRuntime {
 			sql: input.sql,
 			...this.formatResult(queryResult, limit, offset),
 		};
+	}
+
+	async revealLocation(input: RevealLocationInput): Promise<unknown> {
+		return this.deps.revealLocationInEditor(input);
 	}
 
 	dispose(): void {
@@ -298,6 +312,20 @@ export function registerGdxLanguageModelTools(context: vscode.ExtensionContext, 
 					throw new Error('Cancelled');
 				}
 				return toToolResult(await runtime.query(options.input));
+			},
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.lm.registerTool<RevealLocationInput>(TOOL_NAMES.revealLocation, {
+			prepareInvocation: async (options) => ({
+				invocationMessage: progressMessage('Revealing location in GDX editor', options.input.source),
+			}),
+			invoke: async (options, token) => {
+				if (token.isCancellationRequested) {
+					throw new Error('Cancelled');
+				}
+				return toToolResult(await runtime.revealLocation(options.input));
 			},
 		})
 	);

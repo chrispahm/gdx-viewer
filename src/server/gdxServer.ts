@@ -126,7 +126,7 @@ export class GdxServer {
         const bytes = await this.readSource(source);
         const registrationName = await this.duckdbService.registerGdxFile(source, bytes);
         const symbols = await this.duckdbService.getSymbols(registrationName);
-
+        console.log(`[GDX Server] Document opened: ${documentId} (${source}) with ${symbols.length} symbols`);
         this.documents.set(documentId, { source, registrationName, symbols });
 
         return { symbols };
