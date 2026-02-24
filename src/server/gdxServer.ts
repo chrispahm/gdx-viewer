@@ -292,10 +292,26 @@ export class GdxServer {
           }
         }, 500);
 
-        // Run the full CREATE TABLE
-        const test = await bgConn.run(
-          `CREATE OR REPLACE TABLE ${quotedTable} AS SELECT * FROM read_gdx('${escapedPath}', '${escapedSymbol}')`
-        );
+        // Run the full CREATE TABLE (fall back to VIEW if GDX data contains invalid UTF-8)
+        let isView = false;
+        try {
+          await bgConn.run(
+            `CREATE OR REPLACE TABLE ${quotedTable} AS SELECT * FROM read_gdx('${escapedPath}', '${escapedSymbol}')`
+          );
+        } catch (createErr) {
+          const msg = createErr instanceof Error ? createErr.message : String(createErr);
+          if (msg.includes('Invalid unicode') || msg.includes('byte sequence mismatch')) {
+            // GDX data contains non-UTF-8 strings that fail DuckDB's segment statistics validation.
+            // Fall back to a VIEW which avoids storage-layer unicode checks.
+            console.warn(`[GDX Server] Unicode error during CREATE TABLE for ${symbolName}, falling back to VIEW`);
+            await bgConn.run(
+              `CREATE OR REPLACE VIEW ${quotedTable} AS SELECT * FROM read_gdx('${escapedPath}', '${escapedSymbol}')`
+            );
+            isView = true;
+          } else {
+            throw createErr;
+          }
+        }
 
         if (active.cancelled) { return; }
 
@@ -323,7 +339,7 @@ export class GdxServer {
         // Cache the materialized result
         const materialized: MaterializedSymbol = { tableName, columns, totalRowCount };
         doc.materializedSymbols.set(symbolName, materialized);
-        console.log(`[GDX Server] Background materialized ${documentId}/${symbolName}: ${totalRowCount} rows`);
+        console.log(`[GDX Server] Background materialized ${documentId}/${symbolName}: ${totalRowCount} rows${isView ? ' (view fallback)' : ''}`);
 
         this.sendEvent(ws, 'materializationComplete', {
           documentId,
