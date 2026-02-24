@@ -16,6 +16,14 @@ interface ServerResponse {
   error?: string;
 }
 
+interface ServerEvent {
+  type: 'event';
+  event: string;
+  data: unknown;
+}
+
+type EventCallback = (data: unknown) => void;
+
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -24,6 +32,7 @@ type PendingRequest = {
 export class GdxWebSocketClient {
   private ws: WebSocket | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
+  private eventListeners = new Map<string, Set<EventCallback>>();
   private requestCounter = 0;
   private connectionPromise: Promise<void> | null = null;
   private documentId: string | null = null;
@@ -60,8 +69,24 @@ export class GdxWebSocketClient {
 
       this.ws.onmessage = (event) => {
         try {
-          const response: ServerResponse = JSON.parse(event.data);
+          const message = JSON.parse(event.data);
 
+          if (message.type === 'event') {
+            const serverEvent = message as ServerEvent;
+            const listeners = this.eventListeners.get(serverEvent.event);
+            if (listeners) {
+              for (const callback of listeners) {
+                try {
+                  callback(serverEvent.data);
+                } catch (e) {
+                  console.error(`[GDX WebSocket] Event listener error for '${serverEvent.event}':`, e);
+                }
+              }
+            }
+            return;
+          }
+
+          const response = message as ServerResponse;
           const pending = this.pendingRequests.get(response.requestId);
           if (pending) {
             this.pendingRequests.delete(response.requestId);
@@ -108,6 +133,26 @@ export class GdxWebSocketClient {
       });
       this.ws!.send(JSON.stringify(request));
     });
+  }
+
+  on(event: string, callback: EventCallback): () => void {
+    let listeners = this.eventListeners.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      this.eventListeners.set(event, listeners);
+    }
+    listeners.add(callback);
+    return () => this.off(event, callback);
+  }
+
+  off(event: string, callback: EventCallback): void {
+    const listeners = this.eventListeners.get(event);
+    if (listeners) {
+      listeners.delete(callback);
+      if (listeners.size === 0) {
+        this.eventListeners.delete(event);
+      }
+    }
   }
 
   disconnect(): void {

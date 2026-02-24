@@ -60,15 +60,32 @@ function isNumericFilter(filter: FilterValue): filter is NumericFilterState {
   return 'exclude' in filter;
 }
 
-// SQL Builder function
+type MaterializationStatus = 'idle' | 'preview' | 'materializing' | 'materialized';
+
+interface MaterializationProgress {
+  percentage: number;
+  rowsProcessed: number;
+  totalRows: number;
+}
+
+interface MaterializedSymbolResult {
+  tableName: string | null;
+  columns: string[];
+  totalRowCount: number;
+  status: 'preview' | 'materialized';
+  previewRows?: Record<string, unknown>[];
+  previewRowCount?: number;
+}
+
+// SQL Builder function — queries materialized table by name
 function buildSqlQuery(
-  symbolName: string,
+  tableName: string,
   filters: ColumnFilter[],
   sorts: ColumnSort[],
   pageSize: number,
   pageIndex: number
 ): string {
-  let sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${symbolName}')`;
+  let sql = `SELECT * FROM "${tableName}"`;
 
   // Build WHERE clause from filters
   const whereClauses: string[] = [];
@@ -214,8 +231,17 @@ export function App() {
   const initializedDocumentIdRef = useRef<string | null>(null);
   const connectedRef = useRef(false);
   const pendingLocatorRef = useRef<LocatorMessage | null>(null);
+  const selectedSymbolRef = useRef<GdxSymbol | null>(null);
+  const pageIndexRef = useRef(0);
+  const pageSizeRef = useRef(1000);
+  const filtersRef = useRef<ColumnFilter[]>([]);
+  const sortsRef = useRef<ColumnSort[]>([]);
+  const pendingLocatorDuringMaterializationRef = useRef<LocatorMessage | null>(null);
+  const [materializedTableName, setMaterializedTableName] = useState<string | null>(null);
   const [highlightedRowKey, setHighlightedRowKey] = useState<string | null>(null);
   const [highlightedColumnName, setHighlightedColumnName] = useState<string | null>(null);
+  const [materializationStatus, setMaterializationStatus] = useState<MaterializationStatus>('idle');
+  const [materializationProgress, setMaterializationProgress] = useState<MaterializationProgress | null>(null);
 
   // Execute query via WebSocket
   const executeQuery = useCallback(async (sql: string) => {
@@ -247,9 +273,15 @@ export function App() {
       newPageSize: number,
       newFilters: ColumnFilter[],
       newSorts: ColumnSort[],
-      options?: { background?: boolean }
+      options?: { background?: boolean; tableName?: string }
     ): Promise<QueryResult | null> => {
       const isBackgroundRefresh = options?.background ?? false;
+      const tableNameToUse = options?.tableName ?? materializedTableName;
+
+      if (!tableNameToUse) {
+        setError("Symbol not materialized");
+        return null;
+      }
 
       // Set loading state first
       if (!isBackgroundRefresh) {
@@ -261,7 +293,7 @@ export function App() {
       await new Promise(resolve => setTimeout(resolve, 0));
 
       // Build the query for data
-      const sql = buildSqlQuery(symbol.name, newFilters, newSorts, newPageSize, newPageIndex);
+      const sql = buildSqlQuery(tableNameToUse, newFilters, newSorts, newPageSize, newPageIndex);
       setQuery(sql);
 
       try {
@@ -273,10 +305,10 @@ export function App() {
         }
 
         // Only run count query if there are active filters
-        // Without filters, we use symbol.recordCount from metadata (already set in handleSymbolSelect)
+        // Without filters, we use totalRowCount from materialization
         if (newFilters.length > 0) {
           // Build count query (without ORDER BY, LIMIT, OFFSET since those don't affect count)
-          const countSql = buildSqlQuery(symbol.name, newFilters, [], 0, 0)
+          const countSql = buildSqlQuery(tableNameToUse, newFilters, [], 0, 0)
             .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
             .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
 
@@ -303,9 +335,6 @@ export function App() {
               })
               .catch(err => console.error('[Count query error]', err));
           }
-        } else {
-          // No filters - use metadata count
-          setTotalRows(symbol.recordCount);
         }
 
         return dataResult;
@@ -319,29 +348,19 @@ export function App() {
         return null;
       }
     },
-    [countCache]
+    [countCache, materializedTableName]
   );
 
-  const loadDomainValues = useCallback(async (symbol: GdxSymbol) => {
+  const loadFilterOptions = useCallback(async (symbolName: string, currentFilters: ColumnFilter[]) => {
     setIsFilterLoading(true);
     try {
-      // Load domain values for each dimension
-      for (let dim = 1; dim <= symbol.dimensionCount; dim++) {
-        try {
-          const result = await wsClient.request<{ values: string[] }>("getDomainValues", {
-            symbol: symbol.name,
-            dimIndex: dim,
-          });
-          const columnName = `dim_${dim}`;
-          setDomainValues(prev => {
-            const updated = new Map(prev);
-            updated.set(columnName, result.values);
-            return updated;
-          });
-        } catch (err) {
-          console.error(`Error loading dimension ${dim}:`, err);
-        }
-      }
+      const result = await wsClient.request<{ filterOptions: Record<string, string[]> }>("getFilterOptions", {
+        symbolName,
+        filters: currentFilters,
+      });
+      setDomainValues(new Map(Object.entries(result.filterOptions)));
+    } catch (err) {
+      console.error('[loadFilterOptions error]', err);
     } finally {
       setIsFilterLoading(false);
     }
@@ -370,6 +389,7 @@ export function App() {
 
       if (nextSymbols.length === 0) {
         setSelectedSymbol(null);
+        setMaterializedTableName(null);
         setResult(null);
         setTotalRows(0);
         setDomainValues(new Map());
@@ -402,20 +422,43 @@ export function App() {
       }
 
       setSelectedSymbol(nextSymbol);
-      setTotalRows(nextSymbol.recordCount);
       setDomainValues(new Map());
       setCountCache(new Map());
+      setMaterializationStatus('idle');
+      setMaterializationProgress(null);
 
-      await executeQueryWithFiltersAndSorts(
-        nextSymbol,
-        nextPageIndex,
+      // Re-materialize the current symbol after force reload
+      const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
+        symbolName: nextSymbol.name,
         pageSize,
-        nextFilters,
-        nextSorts,
-        { background: true }
-      );
+      });
 
-      loadDomainValues(nextSymbol);
+      if (mat.status === 'materialized') {
+        setMaterializedTableName(mat.tableName);
+        setTotalRows(mat.totalRowCount);
+        setMaterializationStatus('materialized');
+
+        await executeQueryWithFiltersAndSorts(
+          nextSymbol,
+          nextPageIndex,
+          pageSize,
+          nextFilters,
+          nextSorts,
+          { background: true, tableName: mat.tableName! }
+        );
+
+        loadFilterOptions(nextSymbol.name, nextFilters);
+      } else {
+        // Preview mode
+        setMaterializedTableName(null);
+        setTotalRows(mat.totalRowCount);
+        setMaterializationStatus('preview');
+        setResult({
+          columns: mat.columns,
+          rows: mat.previewRows ?? [],
+          rowCount: mat.previewRowCount ?? 0,
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to refresh document");
     } finally {
@@ -430,7 +473,7 @@ export function App() {
     pageIndex,
     pageSize,
     executeQueryWithFiltersAndSorts,
-    loadDomainValues,
+    loadFilterOptions,
   ]);
 
   const handleFiltersChange = useCallback(
@@ -439,8 +482,10 @@ export function App() {
       setFilters(newFilters);
       setPageIndex(0); // Reset to first page when filters change
       await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, newFilters, sorts);
+      // Cross-filtering: update dimension dropdowns based on new filters
+      loadFilterOptions(selectedSymbol.name, newFilters);
     },
-    [selectedSymbol, pageSize, sorts, executeQueryWithFiltersAndSorts]
+    [selectedSymbol, pageSize, sorts, executeQueryWithFiltersAndSorts, loadFilterOptions]
   );
 
   const handleSortsChange = useCallback(
@@ -460,35 +505,67 @@ export function App() {
       setSorts([]);
       setPageIndex(0);
       await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, [], []);
-      // Reload domain values
-      loadDomainValues(selectedSymbol);
+      // Reload filter options with no filters
+      loadFilterOptions(selectedSymbol.name, []);
     },
-    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts, loadDomainValues]
+    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts, loadFilterOptions]
   );
 
   const handleSymbolSelect = useCallback(
     async (symbol: GdxSymbol) => {
       setSelectedSymbol(symbol);
       setPageIndex(0);
-      setTotalRows(symbol.recordCount);
       setFilters([]);
       setSorts([]);
       setDomainValues(new Map());
-      setCountCache(new Map()); // Clear count cache for new symbol
+      setCountCache(new Map());
       setHighlightedRowKey(null);
       setHighlightedColumnName(null);
-
-      // Build default query
-      const sql = buildSqlQuery(symbol.name, [], [], pageSize, 0);
-      setQuery(sql);
+      setMaterializationStatus('idle');
+      setMaterializationProgress(null);
+      setIsLoading(true);
+      setError(null);
 
       vscode.postMessage({ type: "selectSymbol", symbol });
-      await executeQuery(sql);
 
-      // Load domain values in background
-      loadDomainValues(symbol);
+      try {
+        const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
+          symbolName: symbol.name,
+          pageSize,
+        });
+
+        if (mat.status === 'materialized') {
+          // Already cached — full flow
+          setMaterializedTableName(mat.tableName);
+          setTotalRows(mat.totalRowCount);
+          setMaterializationStatus('materialized');
+
+          const sql = buildSqlQuery(mat.tableName!, [], [], pageSize, 0);
+          setQuery(sql);
+          const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
+          setResult(queryResult);
+
+          loadFilterOptions(symbol.name, []);
+        } else {
+          // Preview mode — show preview rows immediately
+          setMaterializedTableName(null);
+          setTotalRows(mat.totalRowCount);
+          setMaterializationStatus('preview');
+          setResult({
+            columns: mat.columns,
+            rows: mat.previewRows ?? [],
+            rowCount: mat.previewRowCount ?? 0,
+          });
+          setQuery(`-- Preview (first ${mat.previewRowCount} rows)`);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Query failed");
+        setResult(null);
+      } finally {
+        setIsLoading(false);
+      }
     },
-    [pageSize, executeQuery, loadDomainValues]
+    [pageSize, loadFilterOptions]
   );
 
   const handlePageChange = useCallback(
@@ -532,6 +609,16 @@ export function App() {
     setIsFilterLoading(false);
   }, []);
 
+  const handleCancelMaterialization = useCallback(async () => {
+    try {
+      await wsClient.request("cancelMaterialization", {});
+    } catch (err) {
+      console.error('[cancelMaterialization error]', err);
+    }
+    setMaterializationStatus(prev => prev === 'idle' || prev === 'materialized' ? prev : 'preview');
+    setMaterializationProgress(null);
+  }, []);
+
   const applyLocator = useCallback(async (
     locator: LocatorMessage,
     availableSymbols: GdxSymbol[] = symbols,
@@ -566,13 +653,38 @@ export function App() {
     setFilters(locatorFilters);
     setSorts([]);
     setPageIndex(0);
-    setTotalRows(symbol.recordCount);
     setDomainValues(new Map());
     setCountCache(new Map());
     setHighlightedColumnName(locator.targetColumn?.trim() || null);
 
-    const queryResult = await executeQueryWithFiltersAndSorts(symbol, 0, pageSize, locatorFilters, []);
-    loadDomainValuesRef.current(symbol);
+    // Materialize if needed
+    const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
+      symbolName: symbol.name,
+      pageSize,
+    });
+
+    if (mat.status !== 'materialized') {
+      // Preview — queue the locator for when materialization completes
+      setMaterializedTableName(null);
+      setTotalRows(mat.totalRowCount);
+      setMaterializationStatus('preview');
+      setResult({
+        columns: mat.columns,
+        rows: mat.previewRows ?? [],
+        rowCount: mat.previewRowCount ?? 0,
+      });
+
+      // Store locator with filters to apply after materialization
+      pendingLocatorDuringMaterializationRef.current = locator;
+      return;
+    }
+
+    setMaterializedTableName(mat.tableName);
+    setTotalRows(mat.totalRowCount);
+    setMaterializationStatus('materialized');
+
+    const queryResult = await executeQueryWithFiltersAndSorts(symbol, 0, pageSize, locatorFilters, [], { tableName: mat.tableName! });
+    loadFilterOptionsRef.current(symbol.name, locatorFilters);
 
     const targetDimensions = locator.focusDimensions ?? Object.fromEntries(
       locatorFilters
@@ -625,19 +737,97 @@ export function App() {
     }
   }, [symbols, selectedSymbol, executeQueryWithFiltersAndSorts, pageSize]);
 
-  const loadDomainValuesRef = useRef(loadDomainValues);
+  const loadFilterOptionsRef = useRef(loadFilterOptions);
   const handleSymbolSelectRef = useRef(handleSymbolSelect);
   const refreshCurrentDocumentRef = useRef(refreshCurrentDocument);
+  const applyLocatorRef = useRef(applyLocator);
 
   useEffect(() => {
     connectedRef.current = connected;
   }, [connected]);
 
+  useEffect(() => { selectedSymbolRef.current = selectedSymbol; }, [selectedSymbol]);
+  useEffect(() => { pageIndexRef.current = pageIndex; }, [pageIndex]);
+  useEffect(() => { pageSizeRef.current = pageSize; }, [pageSize]);
+  useEffect(() => { filtersRef.current = filters; }, [filters]);
+  useEffect(() => { sortsRef.current = sorts; }, [sorts]);
+
   useEffect(() => {
-    loadDomainValuesRef.current = loadDomainValues;
+    loadFilterOptionsRef.current = loadFilterOptions;
     handleSymbolSelectRef.current = handleSymbolSelect;
     refreshCurrentDocumentRef.current = refreshCurrentDocument;
-  }, [loadDomainValues, handleSymbolSelect, refreshCurrentDocument]);
+    applyLocatorRef.current = applyLocator;
+  }, [loadFilterOptions, handleSymbolSelect, refreshCurrentDocument, applyLocator]);
+
+  // WebSocket event listeners for background materialization
+  useEffect(() => {
+    const unsubProgress = wsClient.on('materializationProgress', (data: unknown) => {
+      const d = data as { percentage: number; rowsProcessed: number; totalRows: number };
+      setMaterializationProgress({
+        percentage: d.percentage,
+        rowsProcessed: d.rowsProcessed,
+        totalRows: d.totalRows,
+      });
+      setMaterializationStatus(prev => prev === 'preview' || prev === 'materializing' ? 'materializing' : prev);
+    });
+
+    const unsubComplete = wsClient.on('materializationComplete', async (data: unknown) => {
+      const d = data as { tableName: string; columns: string[]; totalRowCount: number; symbolName: string };
+      setMaterializedTableName(d.tableName);
+      setTotalRows(d.totalRowCount);
+      setMaterializationStatus('materialized');
+      setMaterializationProgress(null);
+
+      // Re-fetch the current page from the materialized table
+      const currentSymbol = selectedSymbolRef.current;
+      if (currentSymbol && currentSymbol.name === d.symbolName) {
+        const currentFilters = filtersRef.current;
+        const currentSorts = sortsRef.current;
+        const currentPageIndex = pageIndexRef.current;
+        const currentPageSize = pageSizeRef.current;
+
+        const sql = buildSqlQuery(d.tableName, currentFilters, currentSorts, currentPageSize, currentPageIndex);
+        setQuery(sql);
+        try {
+          const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
+          setResult(queryResult);
+        } catch (err) {
+          console.error('[materializationComplete re-fetch error]', err);
+        }
+
+        // Load filter options now that table is materialized
+        loadFilterOptionsRef.current(d.symbolName, currentFilters);
+
+        // Apply any pending locator that was queued during materialization
+        const pendingLocator = pendingLocatorDuringMaterializationRef.current;
+        if (pendingLocator) {
+          pendingLocatorDuringMaterializationRef.current = null;
+          setTimeout(() => {
+            applyLocatorRef.current(pendingLocator);
+          }, 0);
+        }
+      }
+    });
+
+    const unsubError = wsClient.on('materializationError', (data: unknown) => {
+      const d = data as { cancelled: boolean; error?: string; symbolName: string };
+      if (d.cancelled) {
+        // Cancelled — keep preview data visible, don't change status
+        return;
+      }
+      // Real error — show notice but keep preview data visible
+      setMaterializationProgress(null);
+      setMaterializationStatus('preview');
+      setRefreshNotice(`Materialization failed: ${d.error ?? 'Unknown error'}. Preview data is still shown.`);
+    });
+
+    return () => {
+      unsubProgress();
+      unsubComplete();
+      unsubError();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Handle messages from extension
   useEffect(() => {
@@ -674,21 +864,47 @@ export function App() {
             if (syms.length > 0) {
               const firstSymbol = syms[0];
               setSelectedSymbol(firstSymbol);
-              setTotalRows(firstSymbol.recordCount);
-              const sql = buildSqlQuery(firstSymbol.name, [], [], 1000, 0);
-              setQuery(sql);
 
               setIsLoading(true);
               try {
-                const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-                setResult(queryResult);
-                // Load domain values in background
-                loadDomainValuesRef.current(firstSymbol);
+                const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
+                  symbolName: firstSymbol.name,
+                  pageSize: 1000,
+                });
+
+                if (mat.status === 'materialized') {
+                  setMaterializedTableName(mat.tableName);
+                  setTotalRows(mat.totalRowCount);
+                  setMaterializationStatus('materialized');
+
+                  const sql = buildSqlQuery(mat.tableName!, [], [], 1000, 0);
+                  setQuery(sql);
+                  const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
+                  setResult(queryResult);
+
+                  loadFilterOptionsRef.current(firstSymbol.name, []);
+                } else {
+                  // Preview mode
+                  setMaterializedTableName(null);
+                  setTotalRows(mat.totalRowCount);
+                  setMaterializationStatus('preview');
+                  setResult({
+                    columns: mat.columns,
+                    rows: mat.previewRows ?? [],
+                    rowCount: mat.previewRowCount ?? 0,
+                  });
+                  setQuery(`-- Preview (first ${mat.previewRowCount} rows)`);
+                }
 
                 if (pendingLocatorRef.current) {
                   const pending = pendingLocatorRef.current;
                   pendingLocatorRef.current = null;
-                  await applyLocator(pending, syms, firstSymbol);
+                  if (mat.status === 'materialized') {
+                    await applyLocator(pending, syms, firstSymbol);
+                  } else {
+                    // Queue for after materialization completes
+                    pendingLocatorDuringMaterializationRef.current = pending;
+                  }
                 }
               } catch (err) {
                 setError(err instanceof Error ? err.message : "Query failed");
@@ -831,6 +1047,7 @@ export function App() {
             dimensionCount={selectedSymbol?.dimensionCount ?? 0}
             highlightedRowKey={highlightedRowKey}
             highlightedColumnName={highlightedColumnName}
+            isMaterialized={materializationStatus === 'materialized'}
           />
         ) : !isLoading && !selectedSymbol ? (
           <div style={{
@@ -853,6 +1070,9 @@ export function App() {
           isFilterLoading={isFilterLoading}
           isRefreshing={isRefreshing}
           onCancelFilterLoading={handleCancelFilterLoading}
+          materializationStatus={materializationStatus}
+          materializationProgress={materializationProgress}
+          onCancelMaterialization={handleCancelMaterialization}
         />
       </div>
     </div>

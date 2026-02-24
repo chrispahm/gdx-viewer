@@ -50,6 +50,12 @@ interface OpenDocumentResult {
 	symbols: GdxSymbol[];
 }
 
+interface MaterializedSymbolResult {
+	tableName: string;
+	columns: string[];
+	totalRowCount: number;
+}
+
 interface DomainValuesResult {
 	values: string[];
 }
@@ -95,17 +101,26 @@ class GdxToolRuntime {
 		const documentId = this.toDocumentId(source);
 		await this.ensureDocumentOpen(documentId, source);
 
+		// Materialize the symbol for faster querying
+		const mat = await this.request<MaterializedSymbolResult>('materializeSymbol', {
+			documentId,
+			symbolName: input.symbol.trim(),
+		});
+
 		const limit = this.normalizeLimit(input.limit);
 		const offset = this.normalizeOffset(input.offset);
-		const escapedSymbol = this.escapeSqlString(input.symbol.trim());
 
-		const sql = `SELECT * FROM read_gdx('__GDX_FILE__', '${escapedSymbol}') LIMIT ${limit} OFFSET ${offset}`;
+		const sql = `SELECT * FROM "${mat.tableName}" LIMIT ${limit} OFFSET ${offset}`;
 		const queryResult = await this.executeQuery(documentId, sql);
 
 		return {
 			source,
 			symbol: input.symbol,
-			...this.formatResult(queryResult, limit, offset),
+			columns: queryResult.columns,
+			rows: queryResult.rows,
+			rowCount: queryResult.rows.length,
+			totalRowCount: mat.totalRowCount,
+			truncated: offset + queryResult.rows.length < mat.totalRowCount,
 		};
 	}
 
@@ -210,10 +225,6 @@ class GdxToolRuntime {
 			totalRowCount: totalRows,
 			truncated,
 		};
-	}
-
-	private escapeSqlString(value: string): string {
-		return value.replace(/'/g, "''");
 	}
 
 	private async ensureDocumentOpen(documentId: string, source: string): Promise<OpenDocumentResult> {

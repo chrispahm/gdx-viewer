@@ -31,13 +31,18 @@ export class DuckdbService {
   private instance: DuckDBInstance | null = null;
   private conn: DuckDBConnection | null = null;
   private tempDir: string | null = null;
+  private dbPath: string = ':memory:';
 
-  async initialize(): Promise<void> {
+  async initialize(dbPath?: string): Promise<void> {
+    if (dbPath !== undefined) {
+      this.dbPath = dbPath;
+    }
+
     const t0 = performance.now();
     const elapsed = () => `${(performance.now() - t0).toFixed(0)}ms`;
 
-    console.log(`[DuckDB] [${elapsed()}] Creating DuckDB instance...`);
-    this.instance = await DuckDBInstance.create(':memory:');
+    console.log(`[DuckDB] [${elapsed()}] Creating DuckDB instance (${this.dbPath})...`);
+    this.instance = await DuckDBInstance.create(this.dbPath);
     console.log(`[DuckDB] [${elapsed()}] Instance created`);
 
     this.conn = await this.instance.connect();
@@ -196,6 +201,37 @@ export class DuckdbService {
     };
   }
 
+  async createBackgroundConnection(): Promise<DuckDBConnection> {
+    if (!this.instance) {
+      throw new Error('DuckDB not initialized');
+    }
+    return this.instance.connect();
+  }
+
+  async runOnConnection(conn: DuckDBConnection, sql: string): Promise<void> {
+    await conn.run(sql);
+  }
+
+  async executeQueryOnConnection(conn: DuckDBConnection, sql: string): Promise<QueryResult> {
+    const result = await conn.run(sql);
+    const columns = result.columnNames();
+    const rawRows = await result.getRowObjectsJS();
+
+    const rows = rawRows.map(row => {
+      const converted: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(row)) {
+        converted[key] = typeof value === 'bigint' ? Number(value) : value;
+      }
+      return converted;
+    });
+
+    return {
+      columns,
+      rows,
+      rowCount: rows.length,
+    };
+  }
+
   async exportQuery(sql: string, format: 'csv' | 'parquet' | 'excel', destinationPath: string): Promise<void> {
     if (!this.conn) {
       throw new Error('DuckDB not initialized');
@@ -228,6 +264,7 @@ export class DuckdbService {
       this.instance = null;
     }
     // Do NOT delete tempDir — remote files must survive reinitialize
+    // Reuses stored dbPath from the original initialize() call
     await this.initialize();
   }
 

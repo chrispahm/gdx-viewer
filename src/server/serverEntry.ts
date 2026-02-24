@@ -9,6 +9,7 @@ import { GdxServer } from './gdxServer';
 
 interface ServerStartupOptions {
   allowRemoteSourceLoading?: boolean;
+  globalStoragePath?: string;
 }
 
 async function main() {
@@ -33,6 +34,7 @@ async function main() {
   console.log(`[GDX Server] [${elapsed()}] Creating GdxServer`);
   const server = new GdxServer({
     allowRemoteSourceLoading: startupOptions.allowRemoteSourceLoading ?? false,
+    globalStoragePath: startupOptions.globalStoragePath,
   });
 
   try {

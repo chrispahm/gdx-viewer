@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { stat } from 'node:fs/promises';
+import { stat, readdir, unlink } from 'node:fs/promises';
 import { fork, ChildProcess } from 'node:child_process';
 import { GdxEditorProvider } from './providers/GdxEditorProvider';
 import { GdxSymbolTreeProvider } from './providers/GdxSymbolTreeProvider';
@@ -34,7 +34,7 @@ let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
 let activeDocumentUri: vscode.Uri | null = null;
 
-async function startServer(extensionPath: string, allowRemoteSourceLoading: boolean): Promise<number> {
+async function startServer(extensionPath: string, options: { allowRemoteSourceLoading: boolean; globalStoragePath: string }): Promise<number> {
 	const serverPath = path.join(extensionPath, 'dist', 'server.js');
 
 	try {
@@ -75,7 +75,7 @@ ${safeStderr}`;
 
 		// Use empty execArgv to prevent inheriting VS Code's debugger/inspector settings
 		// which can cause conflicts with worker threads in the child process
-		serverProcess = fork(serverPath, [extensionPath, JSON.stringify({ allowRemoteSourceLoading })], {
+		serverProcess = fork(serverPath, [extensionPath, JSON.stringify(options)], {
 			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 			execArgv: [], // Clear inherited node flags like --inspect
 		});
@@ -113,8 +113,8 @@ ${safeStderr}`;
 
 		const startupTimeout = setTimeout(() => {
 			serverProcess?.kill();
-			rejectIfPending('Server startup timeout: ready message was not received within 30000ms.\n');
-		}, 90000);
+			rejectIfPending('Server startup timeout: ready message was not received within 180s.\n');
+		}, 180000);
 	});
 }
 
@@ -137,9 +137,30 @@ export async function activate(context: vscode.ExtensionContext) {
 		const config = vscode.workspace.getConfiguration('gdxViewer');
 		const allowRemoteSourceLoading = config.get<boolean>('allowRemoteSourceLoading', false);
 
+		// Resolve globalStoragePath and ensure it exists
+		const globalStoragePath = context.globalStorageUri.fsPath;
+		await vscode.workspace.fs.createDirectory(context.globalStorageUri);
+
+		// Crash recovery: clean up stale DuckDB files from previous sessions
+		try {
+			const entries = await readdir(globalStoragePath);
+			for (const entry of entries) {
+				if (entry.startsWith('gdx-viewer-') && (entry.endsWith('.duckdb') || entry.endsWith('.duckdb.wal'))) {
+					try {
+						await unlink(path.join(globalStoragePath, entry));
+						console.log(`[GDX] Cleaned up stale DB file: ${entry}`);
+					} catch {
+						// Best-effort cleanup
+					}
+				}
+			}
+		} catch {
+			// globalStoragePath may not exist yet (first run), ignore
+		}
+
 		// Start server in child process (bypasses extension host limitations)
 		console.log('[GDX] Starting GDX server...');
-		serverPort = await startServer(context.extensionPath, allowRemoteSourceLoading);
+		serverPort = await startServer(context.extensionPath, { allowRemoteSourceLoading, globalStoragePath });
 		console.log(`[GDX] Server started on port ${serverPort}`);
 
 		// Create tree view provider (minimal, no DuckDB access needed)

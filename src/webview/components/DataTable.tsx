@@ -28,6 +28,7 @@ interface DataTableProps {
   dimensionCount: number;
   highlightedRowKey?: string | null;
   highlightedColumnName?: string | null;
+  isMaterialized?: boolean;
 }
 const SUPERSCRIPTS = {
   '0': '⁰',
@@ -316,6 +317,7 @@ export function DataTable({
   dimensionCount,
   highlightedRowKey,
   highlightedColumnName,
+  isMaterialized = true,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
@@ -366,6 +368,7 @@ export function DataTable({
 
   // Handle filter change from filter components
   const handleFilterChange = useCallback((columnName: string, filterValue: NumericFilterState | string[] | undefined) => {
+    if (!isMaterialized) return;
     let newFilters: ColumnFilter[];
     if (filterValue === undefined) {
       // Remove filter
@@ -394,10 +397,11 @@ export function DataTable({
       }
     }
     onFiltersChange(newFilters);
-  }, [filters, onFiltersChange]);
+  }, [filters, onFiltersChange, isMaterialized]);
 
   // Handle sort change from column headers
   const handleSortChange = useCallback((columnName: string) => {
+    if (!isMaterialized) return;
     const currentSort = getColumnSort(columnName);
     let newSorts: ColumnSort[];
 
@@ -413,7 +417,7 @@ export function DataTable({
     }
 
     onSortsChange(newSorts);
-  }, [sorts, getColumnSort, onSortsChange]);
+  }, [sorts, getColumnSort, onSortsChange, isMaterialized]);
 
   // Helper to get domain values for a column with robust name matching
   const getDomainValuesForColumn = useCallback((columnName: string) => {
@@ -460,10 +464,13 @@ export function DataTable({
           return (
             <div style={styles.headerContent}>
               <button
-                style={styles.headerButton}
+                style={{
+                  ...styles.headerButton,
+                  ...(!isMaterialized ? { cursor: 'default', opacity: 0.7 } : {}),
+                }}
                 onClick={() => handleSortChange(col)}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
+                  if (isMaterialized) e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.backgroundColor = 'transparent';
@@ -523,8 +530,8 @@ export function DataTable({
   });
 
   const totalPages = Math.ceil(totalRows / pageSize);
-  const canPreviousPage = pageIndex > 0;
-  const canNextPage = pageIndex < totalPages - 1;
+  const canPreviousPage = isMaterialized && pageIndex > 0;
+  const canNextPage = isMaterialized && pageIndex < totalPages - 1;
 
   const buildDimensionRowKey = useCallback((row: Record<string, unknown>): string | null => {
     if (dimensionCount <= 0) {
@@ -545,6 +552,18 @@ export function DataTable({
 
   return (
     <div style={styles.container}>
+      {!isMaterialized && (
+        <div style={{
+          padding: '4px 12px',
+          backgroundColor: 'var(--vscode-editorInfo-background, var(--vscode-editorWidget-background))',
+          color: 'var(--vscode-descriptionForeground)',
+          fontSize: 'var(--vscode-font-size)',
+          fontFamily: 'var(--vscode-font-family)',
+          borderBottom: '1px solid var(--vscode-panel-border, transparent)',
+        }}>
+          Showing preview &mdash; sorting, filtering, and pagination available after loading completes
+        </div>
+      )}
       <div style={styles.tableWrapper}>
         <table style={styles.table}>
           <thead style={styles.thead}>
@@ -636,8 +655,12 @@ export function DataTable({
           <span>·</span>
           <select
             value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            style={styles.select}
+            onChange={(e) => isMaterialized && onPageSizeChange(Number(e.target.value))}
+            disabled={!isMaterialized}
+            style={{
+              ...styles.select,
+              ...(!isMaterialized ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+            }}
           >
             {[1000, 10000, 50000].map((size) => (
               <option key={size} value={size}>
