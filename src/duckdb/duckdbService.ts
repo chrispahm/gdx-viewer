@@ -208,10 +208,6 @@ export class DuckdbService {
     return this.instance.connect();
   }
 
-  async runOnConnection(conn: DuckDBConnection, sql: string): Promise<void> {
-    await conn.run(sql);
-  }
-
   async executeQueryOnConnection(conn: DuckDBConnection, sql: string): Promise<QueryResult> {
     const result = await conn.run(sql);
     const columns = result.columnNames();

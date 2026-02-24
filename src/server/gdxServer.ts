@@ -263,7 +263,9 @@ export class GdxServer {
 
         bgConn = await this.duckdb!.createBackgroundConnection();
         active.connection = bgConn;
-        await this.duckdb!.runOnConnection(bgConn, 'LOAD gdx');
+        await bgConn.run('LOAD gdx');
+        await bgConn.run(`SET enable_progress_bar = true`);
+        await bgConn.run(`SET enable_progress_bar_print = false`);
 
         if (active.cancelled) { return; }
 
@@ -272,17 +274,11 @@ export class GdxServer {
           if (active.cancelled) { return; }
           try {
             const progress = bgConn!.progress;
-            const rowsProcessed = Number(progress.rows_processed);
-
-            // Compute percentage ourselves from recordCount (DuckDB doesn't know total for external table functions)
-            let percentage: number;
-            if (rowsProcessed > 0 && recordCount > 0) {
-              percentage = Math.min((rowsProcessed / recordCount) * 100, 100);
-            } else if (progress.percentage > 0) {
-              percentage = progress.percentage;
-            } else {
-              percentage = 0;
-            }
+            // rows_processed is always 0 in our case (create table), so we have to calculate it from recordCount and percentage
+            const totalRowsToProcess = Number(progress.total_rows_to_process);
+            // totalRowsToProcess will be 3 (? or similar), but since we're only creating 1 table we have to correct the percentage accordingly
+            const percentage = totalRowsToProcess > 1 ? Math.min((Number(progress.percentage) * totalRowsToProcess) * 100, 100) : progress.percentage * 100;
+            const rowsProcessed = Math.round((percentage / 100) * recordCount);
 
             this.sendEvent(ws, 'materializationProgress', {
               documentId,
@@ -297,8 +293,7 @@ export class GdxServer {
         }, 500);
 
         // Run the full CREATE TABLE
-        await this.duckdb!.runOnConnection(
-          bgConn,
+        const test = await bgConn.run(
           `CREATE OR REPLACE TABLE ${quotedTable} AS SELECT * FROM read_gdx('${escapedPath}', '${escapedSymbol}')`
         );
 
