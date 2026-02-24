@@ -114,7 +114,7 @@ ${safeStderr}`;
 		const startupTimeout = setTimeout(() => {
 			serverProcess?.kill();
 			rejectIfPending('Server startup timeout: ready message was not received within 30000ms.\n');
-		}, 30000);
+		}, 90000);
 	});
 }
 
@@ -194,10 +194,9 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 
 				if (editorProvider.hasOpenDocument(uri)) {
+					console.log(`[GDX] Source file changed: ${uri.fsPath}, notifying webview`);
 					editorProvider.notifySourceFileChanged(uri);
-					const symbols = editorProvider.getSymbolsForDocument(uri);
-					console.log(`[GDX] Refreshed symbols for ${uri.fsPath}: ${symbols?.length ?? 0} symbols`);
-					treeProvider.setSymbols(symbols || []);
+					// Tree symbols will be updated when the webview refreshes and posts 'symbolsLoaded'
 				}
 			}, FILE_CHANGE_DEBOUNCE_MS);
 

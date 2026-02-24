@@ -6,10 +6,9 @@
  */
 
 import * as http from 'node:http';
-import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { DuckdbService, GdxSymbol, QueryResult } from '../duckdb/duckdbService';
+import { DuckdbService, GdxSymbol } from '../duckdb/duckdbService';
 
 interface ServerRequest {
   type: 'request';
@@ -29,6 +28,7 @@ interface DocumentState {
   source: string;
   registrationName: string;
   symbols: GdxSymbol[];
+  duckdb: DuckdbService;
 }
 
 interface GdxServerOptions {
@@ -38,19 +38,17 @@ interface GdxServerOptions {
 export class GdxServer {
   private server: http.Server;
   private wss: WebSocketServer;
-  private duckdbService: DuckdbService;
   private documents = new Map<string, DocumentState>();
   private port: number = 0;
   private options: GdxServerOptions;
   // Request queue to serialize all DuckDB operations (prevents concurrent query issues)
   private requestQueue: Promise<void> = Promise.resolve();
 
-  constructor(extensionPath: string, options?: Partial<GdxServerOptions>) {
+  constructor(options?: Partial<GdxServerOptions>) {
     this.options = {
       allowRemoteSourceLoading: false,
       ...options,
     };
-    this.duckdbService = new DuckdbService(extensionPath);
     this.server = http.createServer();
     this.wss = new WebSocketServer({ server: this.server });
 
@@ -61,14 +59,14 @@ export class GdxServer {
   }
 
   async start(): Promise<number> {
-    // Initialize DuckDB
-    await this.duckdbService.initialize();
+    console.log('[GDX Server] Starting HTTP server...');
 
     // Start server on random available port
     return new Promise((resolve) => {
       this.server.listen(0, '127.0.0.1', () => {
         const addr = this.server.address();
         this.port = typeof addr === 'object' && addr ? addr.port : 0;
+        console.log(`[GDX Server] HTTP server listening on port ${this.port}`);
         resolve(this.port);
       });
     });
@@ -85,15 +83,36 @@ export class GdxServer {
 
     const { requestId, method, params } = request;
 
-    // Queue this request to ensure serial execution (DuckDB WASM can't handle concurrent queries)
+    // Queue this request to ensure serial execution (serializes DuckDB operations for simplicity)
     this.requestQueue = this.requestQueue.then(async () => {
       try {
         const result = await this.handleRequest(method, params);
         this.sendResponse(ws, { type: 'response', requestId, result });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`[GDX Server] Error handling ${method}:`, errorMessage);
-        this.sendResponse(ws, { type: 'response', requestId, error: errorMessage });
+        const fullMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[GDX Server] Error handling ${method}:`, fullMessage);
+
+        // Fatal DuckDB error — reinitialize the affected document's instance and retry once
+        if (isFatalDuckDbError(fullMessage)) {
+          const documentId = params.documentId as string | undefined;
+          const doc = documentId ? this.documents.get(documentId) : undefined;
+          if (doc) {
+            console.log(`[GDX Server] Fatal DuckDB error on ${documentId}, reinitializing...`);
+            try {
+              await doc.duckdb.reinitialize();
+              const result = await this.handleRequest(method, params);
+              this.sendResponse(ws, { type: 'response', requestId, result });
+              return;
+            } catch (retryError) {
+              const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+              console.error(`[GDX Server] Retry after reinitialize also failed:`, retryMessage);
+              this.sendResponse(ws, { type: 'response', requestId, error: sanitizeErrorMessage(retryMessage) });
+              return;
+            }
+          }
+        }
+
+        this.sendResponse(ws, { type: 'response', requestId, error: sanitizeErrorMessage(fullMessage) });
       }
     });
   }
@@ -117,17 +136,25 @@ export class GdxServer {
           return { symbols: existing.symbols };
         }
 
-        if (existing) {
-          await this.duckdbService.unregisterFile(existing.registrationName);
-          this.documents.delete(documentId);
+        if (existing && forceReload) {
+          // Dispose and recreate this document's DuckDB instance to clear native caches
+          console.log(`[GDX Server] Force reload: reinitializing DuckDB for ${documentId}`);
+          await existing.duckdb.reinitialize();
+          const filePath = await this.resolveToLocalPath(source, existing.duckdb);
+          const symbols = await existing.duckdb.getSymbols(filePath);
+          existing.registrationName = filePath;
+          existing.symbols = symbols;
+          console.log(`[GDX Server] Document reloaded: ${documentId} (${source}) with ${symbols.length} symbols`);
+          return { symbols };
         }
 
-        // Read source and register with DuckDB
-        const bytes = await this.readSource(source);
-        const registrationName = await this.duckdbService.registerGdxFile(source, bytes);
-        const symbols = await this.duckdbService.getSymbols(registrationName);
+        // New document — create a dedicated DuckDB instance
+        const duckdb = new DuckdbService();
+        await duckdb.initialize();
+        const filePath = await this.resolveToLocalPath(source, duckdb);
+        const symbols = await duckdb.getSymbols(filePath);
         console.log(`[GDX Server] Document opened: ${documentId} (${source}) with ${symbols.length} symbols`);
-        this.documents.set(documentId, { source, registrationName, symbols });
+        this.documents.set(documentId, { source, registrationName: filePath, symbols, duckdb });
 
         return { symbols };
       }
@@ -143,7 +170,7 @@ export class GdxServer {
 
         // Replace placeholder with actual registration name
         const actualSql = this.rewriteSqlForDocument(sql, doc);
-        const result = await this.duckdbService.executeQuery(actualSql);
+        const result = await doc.duckdb.executeQuery(actualSql);
         return result;
       }
 
@@ -162,7 +189,7 @@ export class GdxServer {
           ? new Map(Object.entries(dimensionFilters))
           : undefined;
 
-        const values = await this.duckdbService.getDomainValues(
+        const values = await doc.duckdb.getDomainValues(
           doc.registrationName,
           symbol,
           dimIndex,
@@ -176,7 +203,7 @@ export class GdxServer {
         const documentId = params.documentId as string;
         const doc = this.documents.get(documentId);
         if (doc) {
-          await this.duckdbService.unregisterFile(doc.registrationName);
+          await doc.duckdb.dispose();
           this.documents.delete(documentId);
           console.log(`[GDX Server] Document closed: ${documentId}`);
         }
@@ -198,7 +225,7 @@ export class GdxServer {
     return rewrittenSql;
   }
 
-  private async readSource(source: string): Promise<Uint8Array> {
+  private async resolveToLocalPath(source: string, duckdb: DuckdbService): Promise<string> {
     if (this.isHttpSource(source)) {
       if (!this.options.allowRemoteSourceLoading) {
         throw new Error('Remote source loading is disabled. Enable gdxViewer.allowRemoteSourceLoading to use HTTP/HTTPS sources.');
@@ -210,12 +237,12 @@ export class GdxServer {
       }
 
       const arrayBuffer = await response.arrayBuffer();
-      return new Uint8Array(arrayBuffer);
+      const bytes = new Uint8Array(arrayBuffer);
+      return duckdb.registerFile(source, bytes);
     }
 
-    const localPath = this.toLocalPath(source);
-    const bytes = await fs.readFile(localPath);
-    return new Uint8Array(bytes);
+    // Local file — DuckDB reads directly from disk
+    return this.toLocalPath(source);
   }
 
   private isHttpSource(source: string): boolean {
@@ -235,18 +262,42 @@ export class GdxServer {
   }
 
   async stop(): Promise<void> {
-    // Close all documents
-    for (const [id, doc] of this.documents) {
-      await this.duckdbService.unregisterFile(doc.registrationName);
+    // Dispose each document's DuckDB instance
+    for (const [, doc] of this.documents) {
+      await doc.duckdb.dispose();
     }
     this.documents.clear();
-
-    // Dispose DuckDB
-    await this.duckdbService.dispose();
 
     // Close server
     this.wss.close();
     this.server.close();
     console.log('[GDX Server] Stopped');
   }
+}
+
+function isFatalDuckDbError(message: string): boolean {
+  return /database has been invalidated/i.test(message);
+}
+
+function sanitizeErrorMessage(message: string): string {
+  // Replace fatal error with a friendly message
+  if (/database has been invalidated/i.test(message)) {
+    return 'The GDX file could not be read. It may have been modified or deleted externally. The viewer will attempt to recover automatically.';
+  }
+
+  // Strip C++ stack traces (everything after "Stack Trace:" or numbered frame lines)
+  const stackTraceIdx = message.indexOf('Stack Trace:');
+  if (stackTraceIdx !== -1) {
+    message = message.substring(0, stackTraceIdx).trim();
+  }
+  // Remove numbered frame lines like "0  duckdb::..." or "1  0x..."
+  message = message.replace(/\n\d+\s+(duckdb::|0x)[^\n]*/g, '').trim();
+
+  // Truncate very long messages
+  const MAX_LENGTH = 500;
+  if (message.length > MAX_LENGTH) {
+    message = message.substring(0, MAX_LENGTH) + '...';
+  }
+
+  return message;
 }

@@ -1,8 +1,8 @@
 /**
  * Server Entry Point
- * 
+ *
  * This file is the entry point when the server is spawned as a child process.
- * It reads the extension path from command line args and starts the server.
+ * It reads startup options from command line args and starts the server.
  */
 
 import { GdxServer } from './gdxServer';
@@ -12,12 +12,14 @@ interface ServerStartupOptions {
 }
 
 async function main() {
-  const extensionPath = process.argv[2];
-  const optionsArg = process.argv[3];
-  if (!extensionPath) {
-    console.error('[GDX Server] Missing extension path argument');
-    process.exit(1);
-  }
+  const t0 = performance.now();
+  const elapsed = () => `${(performance.now() - t0).toFixed(0)}ms`;
+
+  console.log(`[GDX Server] [${elapsed()}] Starting server entry...`);
+
+  // First arg is extensionPath (kept for backward compat, unused by server)
+  // Second arg is JSON startup options
+  const optionsArg = process.argv[3] ?? process.argv[2];
 
   let startupOptions: ServerStartupOptions = {};
   if (optionsArg) {
@@ -28,16 +30,20 @@ async function main() {
     }
   }
 
-  const server = new GdxServer(extensionPath, {
+  console.log(`[GDX Server] [${elapsed()}] Creating GdxServer`);
+  const server = new GdxServer({
     allowRemoteSourceLoading: startupOptions.allowRemoteSourceLoading ?? false,
   });
 
   try {
+    console.log(`[GDX Server] [${elapsed()}] Calling server.start()...`);
     const port = await server.start();
+    console.log(`[GDX Server] [${elapsed()}] Server started on port ${port}`);
 
     // Send port back to parent process
     if (process.send) {
       process.send({ type: 'ready', port });
+      console.log(`[GDX Server] [${elapsed()}] Sent ready message to parent`);
     }
 
     // Handle shutdown signals

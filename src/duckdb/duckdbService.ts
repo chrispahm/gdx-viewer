@@ -1,7 +1,7 @@
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { Worker } from 'node:worker_threads';
-import { AsyncDuckDB, AsyncDuckDBConnection, ConsoleLogger } from '@duckdb/duckdb-wasm';
+import * as os from 'node:os';
+import * as fs from 'node:fs/promises';
+import { DuckDBInstance, DuckDBConnection } from '@duckdb/node-api';
 
 export interface CancellationToken {
   isCancellationRequested: boolean;
@@ -28,121 +28,94 @@ export interface QueryResult {
 }
 
 export class DuckdbService {
-  private db: AsyncDuckDB | null = null;
-  private conn: AsyncDuckDBConnection | null = null;
-  private extensionPath: string;
-
-  constructor(extensionPath: string) {
-    this.extensionPath = extensionPath;
-  }
+  private instance: DuckDBInstance | null = null;
+  private conn: DuckDBConnection | null = null;
+  private tempDir: string | null = null;
 
   async initialize(): Promise<void> {
-    const duckdbRuntimeDir = path.join(this.extensionPath, 'dist', 'duckdb');
-    const workerEntryPath = path.join(duckdbRuntimeDir, 'duckdb-worker-entry.cjs');
-    const wasmPath = path.join(duckdbRuntimeDir, 'duckdb-eh.wasm');
+    const t0 = performance.now();
+    const elapsed = () => `${(performance.now() - t0).toFixed(0)}ms`;
 
-    // Create Node.js worker_threads Worker using the wrapper that sets up Web Worker globals
-    const nodeWorker = new Worker(workerEntryPath);
+    console.log(`[DuckDB] [${elapsed()}] Creating DuckDB instance...`);
+    this.instance = await DuckDBInstance.create(':memory:');
+    console.log(`[DuckDB] [${elapsed()}] Instance created`);
 
-    // Create Web Worker compatible interface for duckdb-wasm's AsyncDuckDB
-    const listeners = new Map<any, (event: { data: any }) => void>();
-    const worker = {
-      postMessage: (message: any, transfer?: any[]) => {
-        nodeWorker.postMessage(message, transfer as any);
-      },
-      onmessage: null as ((event: { data: any }) => void) | null,
-      onerror: null as ((error: Error) => void) | null,
-      terminate: () => nodeWorker.terminate(),
-      addEventListener: (type: string, listener: (event: { data: any }) => void) => {
-        if (type === 'message') {
-          const wrapped = (data: any) => listener({ data });
-          listeners.set(listener, wrapped);
-          nodeWorker.on('message', wrapped);
-        }
-      },
-      removeEventListener: (type: string, listener: (event: { data: any }) => void) => {
-        if (type === 'message') {
-          const wrapped = listeners.get(listener);
-          if (wrapped) {
-            nodeWorker.off('message', wrapped);
-            listeners.delete(listener);
-          }
-        }
-      },
-    };
-
-    // Forward worker messages to onmessage handler
-    nodeWorker.on('message', (data) => {
-      if (worker.onmessage) {
-        worker.onmessage({ data });
-      }
-    });
-
-    nodeWorker.on('error', (err) => {
-      console.error('[DuckDB] Worker error:', err);
-      if (worker.onerror) {
-        worker.onerror(err);
-      }
-    });
-
-    this.db = new AsyncDuckDB(new ConsoleLogger(), worker as any);
-    await this.db.instantiate(wasmPath);
-    await this.db.open({ allowUnsignedExtensions: true });
-
-    // Create a persistent connection for all queries
-    this.conn = await this.db.connect();
+    this.conn = await this.instance.connect();
+    console.log(`[DuckDB] [${elapsed()}] Connection established`);
 
     // Enable Excel export (requires excel extension)
-    await this.conn.query('INSTALL excel');
-    await this.conn.query('LOAD excel');
+    console.log(`[DuckDB] [${elapsed()}] Installing excel extension...`);
+    await this.conn.run('INSTALL excel');
+    await this.conn.run('LOAD excel');
+    console.log(`[DuckDB] [${elapsed()}] Excel extension loaded`);
 
-    // Load the GDX extension
-    await this.conn.query(`INSTALL duckdb_gdx from 'https://humusklimanetz-couch.thuenen.de/datasets/duckdb_gdx_new'`);
-    await this.conn.query(`LOAD duckdb_gdx`);
+    // Load the GDX community extension
+    console.log(`[DuckDB] [${elapsed()}] Installing gdx extension from community...`);
+    await this.conn.run('INSTALL gdx FROM community');
+    await this.conn.run('LOAD gdx');
+    console.log(`[DuckDB] [${elapsed()}] GDX extension loaded`);
 
     // Warmup query to trigger any lazy initialization
-    await this.conn.query('SELECT 1');
-    // get version for logging
-    const result = await this.conn.query(`SELECT extension_name, extension_version FROM duckdb_extensions()`);
+    await this.conn.run('SELECT 1');
+    console.log(`[DuckDB] [${elapsed()}] Warmup query complete`);
+
+    // Get version for logging
+    const result = await this.conn.run('SELECT extension_name, extension_version FROM duckdb_extensions()');
+    const rows = await result.getRowObjectsJS();
     console.log('[DuckDB] Loaded extensions:\n');
-    for (const row of result.toArray() as Record<string, unknown>[]) {
+    for (const row of rows) {
       console.log(`- ${row.extension_name}: ${row.extension_version}\n`);
     }
+    console.log(`[DuckDB] [${elapsed()}] Initialization complete`);
   }
 
-  async registerGdxFile(uriString: string, bytes: Uint8Array): Promise<string> {
-    if (!this.db) {
-      throw new Error('DuckDB not initialized');
+  async registerFile(source: string, bytes?: Uint8Array): Promise<string> {
+    // For local files (no bytes provided), return the path directly.
+    // DuckDB reads from disk on each query, so no registration needed.
+    if (!bytes) {
+      return source;
     }
 
-    // Create unique registration name based on URI + random
+    // For remote files (where we have bytes), write to a temp file
+    if (!this.tempDir) {
+      this.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gdx-'));
+    }
+
     const randomSuffix = Math.random().toString(16).slice(2, 8);
-    const hash = this.hashString(uriString + randomSuffix);
-    const registrationName = `gdx_${hash}.gdx`;
+    const hash = this.hashString(source + randomSuffix);
+    const tempPath = path.join(this.tempDir, `gdx_${hash}.gdx`);
 
-    await this.db.registerFileBuffer(registrationName, bytes);
-    return registrationName;
+    await fs.writeFile(tempPath, bytes);
+    return tempPath;
   }
 
-  async unregisterFile(registrationName: string): Promise<void> {
-    if (!this.db) {
-      return;
+  async unregisterFile(filePath: string): Promise<void> {
+    // Only delete if it's a temp file we created
+    if (this.tempDir && filePath.startsWith(this.tempDir)) {
+      try {
+        await fs.unlink(filePath);
+      } catch {
+        // Ignore if already deleted
+      }
     }
-    await this.db.dropFile(registrationName);
   }
 
-  async getSymbols(registrationName: string): Promise<GdxSymbol[]> {
+  async getSymbols(filePath: string): Promise<GdxSymbol[]> {
     if (!this.conn) {
       throw new Error('DuckDB not initialized');
     }
 
-    const result = await this.conn.query(`
-      SELECT symbol_name, symbol_type, dimension_count, record_count 
-      FROM gdx_symbols('${registrationName}') 
+    const escapedPath = filePath.replace(/'/g, "''");
+    await this.conn.run(`PRAGMA gdx_preload('${escapedPath}', force_reload=true);`);
+    const result = await this.conn.run(`
+      SELECT symbol_name, symbol_type, dimension_count, record_count
+      FROM gdx_symbols('${escapedPath}')
       ORDER BY symbol_name
     `);
 
-    return result.toArray().map((row: Record<string, unknown>) => ({
+    const rows = await result.getRowObjectsJS();
+    console.log(`[DuckDB] Retrieved ${rows.length} symbols from ${filePath}`);
+    return rows.map((row) => ({
       name: row.symbol_name as string,
       type: row.symbol_type as string,
       dimensionCount: Number(row.dimension_count),
@@ -151,7 +124,7 @@ export class DuckdbService {
   }
 
   async getDomainValues(
-    registrationName: string,
+    filePath: string,
     symbol: string,
     dimIndex: number,
     token?: CancellationToken,
@@ -165,8 +138,10 @@ export class DuckdbService {
       throw new CancellationError();
     }
 
+    const escapedPath = filePath.replace(/'/g, "''");
+
     // Build SQL with optional dimension filters
-    let sql = `SELECT value FROM gdx_domain_values('${registrationName}', '${symbol}', ${dimIndex}`;
+    let sql = `SELECT value FROM gdx_domain_values('${escapedPath}', '${symbol}', ${dimIndex}`;
 
     if (dimensionFilters && dimensionFilters.size > 0) {
       // Build map expression: map(['dim_1', 'dim_2'], ['val1', 'val2'])
@@ -186,13 +161,14 @@ export class DuckdbService {
 
     sql += `)`;
 
-    const result = await this.conn.query(sql);
+    const result = await this.conn.run(sql);
 
     if (token?.isCancellationRequested) {
       throw new CancellationError();
     }
 
-    return result.toArray().map((row: Record<string, unknown>) => row.value as string);
+    const rows = await result.getRowObjectsJS();
+    return rows.map((row) => row.value as string);
   }
 
   async executeQuery(sql: string): Promise<QueryResult> {
@@ -200,9 +176,9 @@ export class DuckdbService {
       throw new Error('DuckDB not initialized');
     }
 
-    const result = await this.conn.query(sql);
-    const rawRows = result.toArray() as Record<string, unknown>[];
-    const columns = result.schema.fields.map(f => f.name);
+    const result = await this.conn.run(sql);
+    const columns = result.columnNames();
+    const rawRows = await result.getRowObjectsJS();
 
     // Convert BigInt to Number for JSON serialization
     const rows = rawRows.map(row => {
@@ -228,7 +204,7 @@ export class DuckdbService {
     const normalizedFormat = format === 'excel' ? 'xlsx' : format;
     const escapedPath = destinationPath.replace(/'/g, "''");
     const copySql = `COPY (${sql}) TO '${escapedPath}' (FORMAT '${normalizedFormat}')`;
-    await this.conn.query(copySql);
+    await this.conn.run(copySql);
   }
 
   private hashString(str: string): string {
@@ -241,14 +217,37 @@ export class DuckdbService {
     return Math.abs(hash).toString(16);
   }
 
-  async dispose(): Promise<void> {
+  async reinitialize(): Promise<void> {
+    // Close existing connection and instance (they may throw if DuckDB is in fatal state)
     if (this.conn) {
-      await this.conn.close();
+      try { this.conn.disconnectSync(); } catch { /* fatal state — ignore */ }
       this.conn = null;
     }
-    if (this.db) {
-      await this.db.terminate();
-      this.db = null;
+    if (this.instance) {
+      try { this.instance.closeSync(); } catch { /* fatal state — ignore */ }
+      this.instance = null;
+    }
+    // Do NOT delete tempDir — remote files must survive reinitialize
+    await this.initialize();
+  }
+
+  async dispose(): Promise<void> {
+    if (this.conn) {
+      try { this.conn.disconnectSync(); } catch { /* may be in fatal state */ }
+      this.conn = null;
+    }
+    if (this.instance) {
+      try { this.instance.closeSync(); } catch { /* may be in fatal state */ }
+      this.instance = null;
+    }
+    // Clean up temp directory
+    if (this.tempDir) {
+      try {
+        await fs.rm(this.tempDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup
+      }
+      this.tempDir = null;
     }
   }
 }

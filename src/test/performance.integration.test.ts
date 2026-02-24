@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 /**
  * Performance Integration Tests
- * 
+ *
  * These tests measure the actual time taken for GDX file operations
  * in the VS Code extension environment.
  */
@@ -75,8 +75,7 @@ suite('Performance Integration Test Suite', () => {
 
 		const { DuckdbService } = await import('../duckdb/duckdbService.js');
 
-		const extensionPath = path.join(__dirname, '..', '..');
-		const service = new DuckdbService(extensionPath);
+		const service = new DuckdbService();
 
 		console.log('[PERF TEST] === DuckDB Service Direct Performance Test ===');
 
@@ -87,17 +86,12 @@ suite('Performance Integration Test Suite', () => {
 			const initEnd = performance.now();
 			console.log(`[PERF TEST] DuckDB initialization: ${(initEnd - initStart).toFixed(0)}ms`);
 
-			// Register file
-			const fileBytes = fs.readFileSync(largeGdxPath);
-			const registerStart = performance.now();
-			const registrationName = await service.registerGdxFile(largeGdxPath, new Uint8Array(fileBytes));
-			const registerEnd = performance.now();
-			console.log(`[PERF TEST] File registration: ${(registerEnd - registerStart).toFixed(0)}ms`);
-			console.log(`[PERF TEST] File size: ${(fileBytes.length / 1024 / 1024).toFixed(2)} MB`);
+			const fileStats = fs.statSync(largeGdxPath);
+			console.log(`[PERF TEST] File size: ${(fileStats.size / 1024 / 1024).toFixed(2)} MB`);
 
-			// Get symbols
+			// Get symbols (DuckDB reads directly from disk)
 			const symbolsStart = performance.now();
-			const symbols = await service.getSymbols(registrationName);
+			const symbols = await service.getSymbols(largeGdxPath);
 			const symbolsEnd = performance.now();
 			console.log(`[PERF TEST] Get symbols (${symbols.length} total): ${(symbolsEnd - symbolsStart).toFixed(0)}ms`);
 
@@ -109,10 +103,12 @@ suite('Performance Integration Test Suite', () => {
 			const testSymbol = symbol || symbols[0];
 			console.log(`[PERF TEST] Testing symbol: ${testSymbol.name} (${testSymbol.recordCount} records, ${testSymbol.dimensionCount} dims)`);
 
+			const escapedPath = largeGdxPath.replace(/'/g, "''");
+
 			// Query first page (LIMIT 10000 - matches actual extension default page size)
 			const query1Start = performance.now();
 			const result1 = await service.executeQuery(
-				`SELECT * FROM read_gdx('${registrationName}', '${testSymbol.name}') LIMIT 10000 OFFSET 0`
+				`SELECT * FROM read_gdx('${escapedPath}', '${testSymbol.name}') LIMIT 10000 OFFSET 0`
 			);
 			const query1End = performance.now();
 			console.log(`[PERF TEST] First page query (10000 rows): ${(query1End - query1Start).toFixed(0)}ms`);
@@ -121,7 +117,7 @@ suite('Performance Integration Test Suite', () => {
 			// Explain Analyze
 			console.log('[PERF TEST] Running EXPLAIN ANALYZE...');
 			const explainResult = await service.executeQuery(
-				`EXPLAIN ANALYZE SELECT * FROM read_gdx('${registrationName}', '${testSymbol.name}') LIMIT 100 OFFSET 0`
+				`EXPLAIN ANALYZE SELECT * FROM read_gdx('${escapedPath}', '${testSymbol.name}') LIMIT 100 OFFSET 0`
 			);
 			console.log('[PERF TEST] EXPLAIN ANALYZE result:');
 			console.log(JSON.stringify(explainResult.rows, null, 2));
@@ -129,7 +125,7 @@ suite('Performance Integration Test Suite', () => {
 			// Query second page
 			const query2Start = performance.now();
 			const result2 = await service.executeQuery(
-				`SELECT * FROM read_gdx('${registrationName}', '${testSymbol.name}') LIMIT 10000 OFFSET 10000`
+				`SELECT * FROM read_gdx('${escapedPath}', '${testSymbol.name}') LIMIT 10000 OFFSET 10000`
 			);
 			const query2End = performance.now();
 			console.log(`[PERF TEST] Second page query (10000 rows): ${(query2End - query2Start).toFixed(0)}ms`);
@@ -137,7 +133,7 @@ suite('Performance Integration Test Suite', () => {
 			// Query third page
 			const query3Start = performance.now();
 			const result3 = await service.executeQuery(
-				`SELECT * FROM read_gdx('${registrationName}', '${testSymbol.name}') LIMIT 10000 OFFSET 20000`
+				`SELECT * FROM read_gdx('${escapedPath}', '${testSymbol.name}') LIMIT 10000 OFFSET 20000`
 			);
 			const query3End = performance.now();
 			console.log(`[PERF TEST] Third page query (10000 rows): ${(query3End - query3Start).toFixed(0)}ms`);
@@ -145,7 +141,7 @@ suite('Performance Integration Test Suite', () => {
 			// Domain values for first dimension (this is expensive!)
 			console.log('[PERF TEST] Testing domain values (may take a while for large files)...');
 			const domainStart = performance.now();
-			const domainValues = await service.getDomainValues(registrationName, testSymbol.name, 1);
+			const domainValues = await service.getDomainValues(largeGdxPath, testSymbol.name, 1);
 			const domainEnd = performance.now();
 			console.log(`[PERF TEST] Domain values dim 1 (${domainValues.length} values): ${(domainEnd - domainStart).toFixed(0)}ms`);
 
@@ -163,13 +159,10 @@ suite('Performance Integration Test Suite', () => {
 
 			console.log('[PERF TEST] === Performance Summary ===');
 			console.log(`[PERF TEST] DuckDB init: ${(initEnd - initStart).toFixed(0)}ms`);
-			console.log(`[PERF TEST] File register: ${(registerEnd - registerStart).toFixed(0)}ms`);
 			console.log(`[PERF TEST] Get symbols: ${(symbolsEnd - symbolsStart).toFixed(0)}ms`);
 			console.log(`[PERF TEST] Page queries: ${(query1End - query1Start).toFixed(0)}ms / ${(query2End - query2Start).toFixed(0)}ms / ${(query3End - query3Start).toFixed(0)}ms`);
 			console.log(`[PERF TEST] Domain values: ${(domainEnd - domainStart).toFixed(0)}ms`);
 
-			// Clean up
-			await service.unregisterFile(registrationName);
 			await service.dispose();
 		} catch (error) {
 			await service.dispose();

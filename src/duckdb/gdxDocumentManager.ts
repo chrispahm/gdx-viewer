@@ -27,7 +27,7 @@ export class GdxDocumentManager {
     this.duckdbService = duckdbService;
   }
 
-  async openDocument(uri: vscode.Uri, bytes: Uint8Array): Promise<GdxDocumentState> {
+  async openDocument(uri: vscode.Uri): Promise<GdxDocumentState> {
     const key = uri.toString();
 
     // Return existing document if already open
@@ -36,8 +36,8 @@ export class GdxDocumentManager {
       return existing;
     }
 
-    // Register file with DuckDB
-    const registrationName = await this.duckdbService.registerGdxFile(uri.toString(), bytes);
+    // DuckDB reads directly from disk — use the file path as the registration name
+    const registrationName = uri.fsPath;
 
     // Get symbols
     const symbols = await this.duckdbService.getSymbols(registrationName);
