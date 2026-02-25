@@ -18,9 +18,10 @@ async function main() {
 
   console.log(`[GDX Server] [${elapsed()}] Starting server entry...`);
 
-  // First arg is extensionPath (kept for backward compat, unused by server)
+  // First arg is extensionPath (used to locate bundled DuckDB extensions)
   // Second arg is JSON startup options
-  const optionsArg = process.argv[3] ?? process.argv[2];
+  const extensionPath = process.argv[2];
+  const optionsArg = process.argv[3];
 
   let startupOptions: ServerStartupOptions = {};
   if (optionsArg) {
@@ -31,10 +32,11 @@ async function main() {
     }
   }
 
-  console.log(`[GDX Server] [${elapsed()}] Creating GdxServer`);
+  console.log(`[GDX Server] [${elapsed()}] Creating GdxServer (extensionPath: ${extensionPath})`);
   const server = new GdxServer({
     allowRemoteSourceLoading: startupOptions.allowRemoteSourceLoading ?? false,
     globalStoragePath: startupOptions.globalStoragePath,
+    extensionPath,
   });
 
   try {

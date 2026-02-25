@@ -5,6 +5,7 @@ interface TextFilterProps {
   uniqueValues: string[];
   currentFilter: string[] | undefined;
   onFilterChange: (columnName: string, selectedValues: string[] | undefined) => void;
+  domainValuesLoading?: boolean;
 }
 
 const styles = {
@@ -155,7 +156,7 @@ const styles = {
   },
 };
 
-export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterChange }: TextFilterProps) {
+export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterChange, domainValuesLoading = false }: TextFilterProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedValues, setSelectedValues] = useState<Set<string>>(new Set(uniqueValues));
@@ -261,7 +262,17 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
   };
 
   if (uniqueValues.length === 0) {
-    return null;
+    return (
+      <div style={styles.container}>
+        <button
+          style={{ ...styles.filterButton, opacity: 0.5, cursor: 'default' }}
+          disabled
+        >
+          <span>Loading...</span>
+          <span>&#x25BC;</span>
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -285,7 +296,7 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
         }}
         title={isActive ? `${filterValue.length} of ${uniqueValues.length} selected` : "Filter values"}
       >
-        <span>{isActive ? `${filterValue.length} selected` : "Filter..."}</span>
+        <span>{isActive ? `${filterValue.length} selected` : domainValuesLoading ? "Loading..." : "Filter..."}</span>
         <span>{isOpen ? "▲" : "▼"}</span>
       </button>
 

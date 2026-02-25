@@ -8,9 +8,7 @@ interface MaterializationProgress {
 
 interface LoadingOverlayProps {
   isLoading: boolean;
-  isFilterLoading: boolean;
   isRefreshing?: boolean;
-  onCancelFilterLoading: () => void;
   materializationStatus?: MaterializationStatus;
   materializationProgress?: MaterializationProgress | null;
   onCancelMaterialization?: () => void;
@@ -42,22 +40,6 @@ const styles = {
     borderTopColor: 'var(--vscode-foreground)',
     borderRadius: '50%',
     animation: 'spin 1s linear infinite',
-  },
-  filterBanner: {
-    position: 'fixed' as const,
-    bottom: '16px',
-    right: '16px',
-    backgroundColor: 'var(--vscode-editorWidget-background)',
-    color: 'var(--vscode-foreground)',
-    padding: '8px 16px',
-    borderRadius: '4px',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    zIndex: 50,
-    fontFamily: 'var(--vscode-font-family)',
-    fontSize: 'var(--vscode-font-size)',
   },
   refreshBanner: {
     position: 'fixed' as const,
@@ -124,16 +106,14 @@ const styles = {
 
 export function LoadingOverlay({
   isLoading,
-  isFilterLoading,
   isRefreshing = false,
-  onCancelFilterLoading,
   materializationStatus = 'idle',
   materializationProgress,
   onCancelMaterialization,
 }: LoadingOverlayProps) {
   const showMaterializationBanner = materializationStatus === 'preview' || materializationStatus === 'materializing';
 
-  if (!isLoading && !isFilterLoading && !isRefreshing && !showMaterializationBanner) {
+  if (!isLoading && !isRefreshing && !showMaterializationBanner) {
     return null;
   }
 
@@ -155,24 +135,6 @@ export function LoadingOverlay({
             <div style={styles.spinner} />
             <span>Loading data...</span>
           </div>
-        </div>
-      )}
-      {isFilterLoading && (
-        <div style={styles.filterBanner}>
-          <div style={styles.spinner} />
-          <span>Loading filters...</span>
-          <button
-            style={styles.cancelButton}
-            onClick={onCancelFilterLoading}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }}
-          >
-            Cancel
-          </button>
         </div>
       )}
       {isRefreshing && (

@@ -4,6 +4,9 @@ out/**
 node_modules/**
 !node_modules/@duckdb/**
 src/**
+scripts/**
+duckdb-extensions/**
+!duckdb-extensions/bundle/**
 .gitignore
 .yarnrc
 esbuild.js

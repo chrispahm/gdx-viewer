@@ -1,6 +1,6 @@
 # GDX Viewer
 
-VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB-WASM + the `duckdb_gdx` extension to read symbols, preview data, run ad-hoc SQL, and export results.
+VS Code custom editor for exploring GAMS `.gdx` files. It uses DuckDB + the `gdx` extension to read symbols, preview data, run ad-hoc SQL, and export results.
 
 ![GDX Viewer Screenshot](/media/gdx-viewer.gif)
 

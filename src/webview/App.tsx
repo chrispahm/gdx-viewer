@@ -4,6 +4,19 @@ import { SqlToolbar } from "./components/SqlToolbar";
 import { LoadingOverlay } from "./components/LoadingOverlay";
 import { type DisplayAttributes } from "./components/AttributesPanel";
 import { wsClient } from "./wsClient";
+import { buildSqlQuery } from "./lib/sqlBuilder";
+import { useInfiniteData } from "./hooks/useInfiniteData";
+
+// Re-export types from sqlBuilder for backward compatibility
+export type {
+  NumericFilterState,
+  TextFilterState,
+  FilterValue,
+  ColumnFilter,
+  ColumnSort,
+} from "./lib/sqlBuilder";
+
+import type { ColumnFilter, ColumnSort } from "./lib/sqlBuilder";
 
 interface GdxSymbol {
   name: string;
@@ -18,46 +31,12 @@ interface QueryResult {
   rowCount: number;
 }
 
-// Filter types for SQL generation
-export interface NumericFilterState {
-  min?: number;
-  max?: number;
-  exclude: boolean;
-  showEPS: boolean;
-  showNA: boolean;
-  showPosInf: boolean;
-  showNegInf: boolean;
-  showUNDF: boolean;
-  showAcronyms: boolean;
-}
-
-export interface TextFilterState {
-  selectedValues: string[];
-}
-
-export type FilterValue = NumericFilterState | TextFilterState;
-
-export interface ColumnFilter {
-  columnName: string;
-  filterValue: FilterValue;
-}
-
-export interface ColumnSort {
-  columnName: string;
-  direction: 'asc' | 'desc';
-}
-
 interface LocatorMessage {
   type: 'applyLocator';
   symbolName?: string;
   filters?: ColumnFilter[];
   targetColumn?: string;
   focusDimensions?: Record<string, string>;
-}
-
-// Helper to check if a filter is numeric
-function isNumericFilter(filter: FilterValue): filter is NumericFilterState {
-  return 'exclude' in filter;
 }
 
 type MaterializationStatus = 'idle' | 'preview' | 'materializing' | 'materialized';
@@ -75,103 +54,6 @@ interface MaterializedSymbolResult {
   status: 'preview' | 'materialized';
   previewRows?: Record<string, unknown>[];
   previewRowCount?: number;
-}
-
-// SQL Builder function — queries materialized table by name
-function buildSqlQuery(
-  tableName: string,
-  filters: ColumnFilter[],
-  sorts: ColumnSort[],
-  pageSize: number,
-  pageIndex: number
-): string {
-  let sql = `SELECT * FROM "${tableName}"`;
-
-  // Build WHERE clause from filters
-  const whereClauses: string[] = [];
-  for (const filter of filters) {
-    const { columnName, filterValue } = filter;
-
-    if (isNumericFilter(filterValue)) {
-      // Numeric filter with range and special values
-      const conditions: string[] = [];
-
-      // Check if any special values are disabled (i.e., we need to filter them out)
-      const hasDisabledSpecialValues =
-        !filterValue.showEPS ||
-        !filterValue.showNA ||
-        !filterValue.showPosInf ||
-        !filterValue.showNegInf ||
-        !filterValue.showUNDF;
-
-      // If ALL special values are shown and there's no range, skip this filter
-      if (!hasDisabledSpecialValues && filterValue.min === undefined && filterValue.max === undefined) {
-        continue;
-      }
-
-      // Build conditions for special values that should be EXCLUDED
-      const excludedSpecialValues: string[] = [];
-      if (!filterValue.showEPS) excludedSpecialValues.push('EPS');
-      if (!filterValue.showNA) excludedSpecialValues.push('NA');
-      if (!filterValue.showUNDF) excludedSpecialValues.push('UNDF');
-
-      // Handle infinity values
-      if (!filterValue.showPosInf) {
-        excludedSpecialValues.push('+INF');
-        conditions.push(`"${columnName}" != CAST('Infinity' AS DOUBLE)`);
-      }
-      if (!filterValue.showNegInf) {
-        excludedSpecialValues.push('-INF');
-        conditions.push(`"${columnName}" != CAST('-Infinity' AS DOUBLE)`);
-      }
-
-      // Exclude special string values
-      if (excludedSpecialValues.length > 0) {
-        const excludeList = excludedSpecialValues.map(v => `'${v}'`).join(', ');
-        conditions.push(`CAST("${columnName}" AS VARCHAR) NOT IN (${excludeList})`);
-      }
-
-      // Range conditions
-      if (filterValue.min !== undefined) {
-        conditions.push(`"${columnName}" >= ${filterValue.min}`);
-      }
-      if (filterValue.max !== undefined) {
-        conditions.push(`"${columnName}" <= ${filterValue.max}`);
-      }
-
-      if (conditions.length > 0) {
-        let clause = conditions.join(' AND ');
-        if (filterValue.exclude) {
-          clause = `NOT (${clause})`;
-        }
-        whereClauses.push(`(${clause})`);
-      }
-    } else {
-      // Text filter with selected values
-      if (filterValue.selectedValues.length === 0) {
-        continue; // No values selected means show all
-      }
-      const valueList = filterValue.selectedValues.map(v => `'${v.replace(/'/g, "''")}'`).join(', ');
-      whereClauses.push(`"${columnName}" IN (${valueList})`);
-    }
-  }
-
-  if (whereClauses.length > 0) {
-    sql += ` WHERE ${whereClauses.join(' AND ')}`;
-  }
-
-  // Add ORDER BY clause
-  if (sorts.length > 0) {
-    const orderClauses = sorts.map(sort =>
-      `"${sort.columnName}" ${sort.direction.toUpperCase()}`
-    );
-    sql += ` ORDER BY ${orderClauses.join(', ')}`;
-  }
-
-  // Add pagination
-  sql += ` LIMIT ${pageSize} OFFSET ${pageIndex * pageSize}`;
-
-  return sql;
 }
 
 function buildDimensionRowKey(row: Record<string, unknown>, dimensionCount: number): string | null {
@@ -208,12 +90,9 @@ export function App() {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize, setPageSize] = useState(1000);
   const [totalRows, setTotalRows] = useState(0);
   const [filters, setFilters] = useState<ColumnFilter[]>([]);
   const [sorts, setSorts] = useState<ColumnSort[]>([]);
@@ -232,18 +111,81 @@ export function App() {
   const connectedRef = useRef(false);
   const pendingLocatorRef = useRef<LocatorMessage | null>(null);
   const selectedSymbolRef = useRef<GdxSymbol | null>(null);
-  const pageIndexRef = useRef(0);
-  const pageSizeRef = useRef(1000);
   const filtersRef = useRef<ColumnFilter[]>([]);
   const sortsRef = useRef<ColumnSort[]>([]);
   const pendingLocatorDuringMaterializationRef = useRef<LocatorMessage | null>(null);
   const [materializedTableName, setMaterializedTableName] = useState<string | null>(null);
   const [highlightedRowKey, setHighlightedRowKey] = useState<string | null>(null);
   const [highlightedColumnName, setHighlightedColumnName] = useState<string | null>(null);
+  const [scrollToRowIndex, setScrollToRowIndex] = useState<number | null>(null);
   const [materializationStatus, setMaterializationStatus] = useState<MaterializationStatus>('idle');
   const [materializationProgress, setMaterializationProgress] = useState<MaterializationProgress | null>(null);
+  // Preview rows shown before materialization completes
+  const [previewData, setPreviewData] = useState<{ columns: string[]; rows: Record<string, unknown>[] } | null>(null);
+  // Track whether domain values are still being loaded
+  const [domainValuesLoading, setDomainValuesLoading] = useState(false);
 
-  // Execute query via WebSocket
+  // Infinite data hook — auto-fetches when enabled and tableName/filters/sorts change
+  const infiniteData = useInfiniteData({
+    tableName: materializedTableName,
+    filters,
+    sorts,
+    totalRows,
+    enabled: materializationStatus === 'materialized',
+  });
+
+  // Determine which data to show: preview rows or infinite data rows
+  // Keep showing preview data until infinite data actually has rows, to prevent
+  // filter components from unmounting during the preview→materialized transition.
+  const isInPreviewMode = materializationStatus !== 'materialized' && materializationStatus !== 'idle';
+  const useInfinite = materializationStatus === 'materialized' && infiniteData.rows.length > 0;
+  const displayColumns = useInfinite
+    ? (result?.columns ?? [])
+    : (previewData ? previewData.columns : (result?.columns ?? []));
+  const displayData = useInfinite
+    ? infiniteData.rows
+    : (previewData ? previewData.rows : infiniteData.rows);
+
+  // Clear preview data once infinite data has loaded its first page
+  useEffect(() => {
+    if (materializationStatus === 'materialized' && infiniteData.rows.length > 0 && previewData) {
+      setPreviewData(null);
+    }
+  }, [materializationStatus, infiniteData.rows.length, previewData]);
+
+  // Run count query when filters are active
+  const runCountQuery = useCallback(async (tableName: string, currentFilters: ColumnFilter[]) => {
+    if (currentFilters.length === 0) return;
+
+    const countSql = buildSqlQuery(tableName, currentFilters, [], 0, 0)
+      .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
+      .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
+
+    const cachedCount = countCache.get(countSql);
+    if (cachedCount !== undefined) {
+      setTotalRows(cachedCount);
+      return;
+    }
+
+    try {
+      const countResult = await wsClient.request<QueryResult>("executeQuery", { sql: countSql });
+      if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
+        const count = typeof countResult.rows[0].count === 'bigint'
+          ? Number(countResult.rows[0].count)
+          : countResult.rows[0].count as number;
+        setTotalRows(count);
+        setCountCache(prev => {
+          const updated = new Map(prev);
+          updated.set(countSql, count);
+          return updated;
+        });
+      }
+    } catch (err) {
+      console.error('[Count query error]', err);
+    }
+  }, [countCache]);
+
+  // Execute query via WebSocket (for SQL toolbar manual queries)
   const executeQuery = useCallback(async (sql: string) => {
     if (!connected) {
       setError("Not connected to server");
@@ -252,12 +194,11 @@ export function App() {
     setIsLoading(true);
     setError(null);
 
-    // Let React render the loading state before doing work
     await new Promise(resolve => setTimeout(resolve, 0));
 
     try {
-      const result = await wsClient.request<QueryResult>("executeQuery", { sql });
-      setResult(result);
+      const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
+      setResult(queryResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query failed");
       setResult(null);
@@ -265,106 +206,6 @@ export function App() {
       setIsLoading(false);
     }
   }, [connected]);
-
-  const executeQueryWithFiltersAndSorts = useCallback(
-    async (
-      symbol: GdxSymbol,
-      newPageIndex: number,
-      newPageSize: number,
-      newFilters: ColumnFilter[],
-      newSorts: ColumnSort[],
-      options?: { background?: boolean; tableName?: string }
-    ): Promise<QueryResult | null> => {
-      const isBackgroundRefresh = options?.background ?? false;
-      const tableNameToUse = options?.tableName ?? materializedTableName;
-
-      if (!tableNameToUse) {
-        setError("Symbol not materialized");
-        return null;
-      }
-
-      // Set loading state first
-      if (!isBackgroundRefresh) {
-        setIsLoading(true);
-      }
-      setError(null);
-
-      // Use setTimeout to let React render the loading state before doing any work
-      await new Promise(resolve => setTimeout(resolve, 0));
-
-      // Build the query for data
-      const sql = buildSqlQuery(tableNameToUse, newFilters, newSorts, newPageSize, newPageIndex);
-      setQuery(sql);
-
-      try {
-        // Execute data query
-        const dataResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-        setResult(dataResult);
-        if (!isBackgroundRefresh) {
-          setIsLoading(false);
-        }
-
-        // Only run count query if there are active filters
-        // Without filters, we use totalRowCount from materialization
-        if (newFilters.length > 0) {
-          // Build count query (without ORDER BY, LIMIT, OFFSET since those don't affect count)
-          const countSql = buildSqlQuery(tableNameToUse, newFilters, [], 0, 0)
-            .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
-            .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
-
-          // Check count cache - only run count query if not cached
-          const cachedCount = countCache.get(countSql);
-          if (cachedCount !== undefined) {
-            setTotalRows(cachedCount);
-          } else {
-            // Run count query in background and cache result
-            wsClient.request<QueryResult>("executeQuery", { sql: countSql })
-              .then(countResult => {
-                if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
-                  const count = typeof countResult.rows[0].count === 'bigint'
-                    ? Number(countResult.rows[0].count)
-                    : countResult.rows[0].count as number;
-                  setTotalRows(count);
-                  // Cache the result
-                  setCountCache(prev => {
-                    const updated = new Map(prev);
-                    updated.set(countSql, count);
-                    return updated;
-                  });
-                }
-              })
-              .catch(err => console.error('[Count query error]', err));
-          }
-        }
-
-        return dataResult;
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Query failed");
-        if (!isBackgroundRefresh) {
-          setResult(null);
-          setIsLoading(false);
-        }
-
-        return null;
-      }
-    },
-    [countCache, materializedTableName]
-  );
-
-  const loadFilterOptions = useCallback(async (symbolName: string, currentFilters: ColumnFilter[]) => {
-    setIsFilterLoading(true);
-    try {
-      const result = await wsClient.request<{ filterOptions: Record<string, string[]> }>("getFilterOptions", {
-        symbolName,
-        filters: currentFilters,
-      });
-      setDomainValues(new Map(Object.entries(result.filterOptions)));
-    } catch (err) {
-      console.error('[loadFilterOptions error]', err);
-    } finally {
-      setIsFilterLoading(false);
-    }
-  }, []);
 
   const refreshCurrentDocument = useCallback(async () => {
     if (!connected || !documentSource) {
@@ -391,6 +232,7 @@ export function App() {
         setSelectedSymbol(null);
         setMaterializedTableName(null);
         setResult(null);
+        setPreviewData(null);
         setTotalRows(0);
         setDomainValues(new Map());
         setCountCache(new Map());
@@ -404,17 +246,14 @@ export function App() {
 
       let nextFilters = filters;
       let nextSorts = sorts;
-      let nextPageIndex = pageIndex;
 
       if (!nextSymbol) {
         nextSymbol = nextSymbols[0];
         nextFilters = [];
         nextSorts = [];
-        nextPageIndex = 0;
 
         setFilters([]);
         setSorts([]);
-        setPageIndex(0);
 
         if (selectedSymbol) {
           setRefreshNotice(`Symbol '${selectedSymbol.name}' is no longer available. Showing '${nextSymbol.name}'.`);
@@ -423,6 +262,7 @@ export function App() {
 
       setSelectedSymbol(nextSymbol);
       setDomainValues(new Map());
+      setDomainValuesLoading(true);
       setCountCache(new Map());
       setMaterializationStatus('idle');
       setMaterializationProgress(null);
@@ -430,33 +270,29 @@ export function App() {
       // Re-materialize the current symbol after force reload
       const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
         symbolName: nextSymbol.name,
-        pageSize,
       });
 
       if (mat.status === 'materialized') {
         setMaterializedTableName(mat.tableName);
         setTotalRows(mat.totalRowCount);
+        setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
         setMaterializationStatus('materialized');
+        // Hook auto-fetches when tableName changes + enabled becomes true
+        // Also set filters/sorts so hook picks up correct state
+        setFilters(nextFilters);
+        setSorts(nextSorts);
 
-        await executeQueryWithFiltersAndSorts(
-          nextSymbol,
-          nextPageIndex,
-          pageSize,
-          nextFilters,
-          nextSorts,
-          { background: true, tableName: mat.tableName! }
-        );
-
-        loadFilterOptions(nextSymbol.name, nextFilters);
+        if (nextFilters.length > 0 && mat.tableName) {
+          runCountQuery(mat.tableName, nextFilters);
+        }
       } else {
         // Preview mode
         setMaterializedTableName(null);
         setTotalRows(mat.totalRowCount);
         setMaterializationStatus('preview');
-        setResult({
+        setPreviewData({
           columns: mat.columns,
           rows: mat.previewRows ?? [],
-          rowCount: mat.previewRowCount ?? 0,
         });
       }
     } catch (err) {
@@ -470,59 +306,65 @@ export function App() {
     selectedSymbol,
     filters,
     sorts,
-    pageIndex,
-    pageSize,
-    executeQueryWithFiltersAndSorts,
-    loadFilterOptions,
+    runCountQuery,
   ]);
 
   const handleFiltersChange = useCallback(
     async (newFilters: ColumnFilter[]) => {
       if (!selectedSymbol) return;
       setFilters(newFilters);
-      setPageIndex(0); // Reset to first page when filters change
-      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, newFilters, sorts);
-      // Cross-filtering: update dimension dropdowns based on new filters
-      loadFilterOptions(selectedSymbol.name, newFilters);
+      setScrollToRowIndex(null);
+      // Hook auto-resets on filter change and fetches new data
+      // Run count query for filtered totals
+      if (materializedTableName && newFilters.length > 0) {
+        runCountQuery(materializedTableName, newFilters);
+      } else if (newFilters.length === 0) {
+        // Restore unfiltered total from materialization
+        setTotalRows(selectedSymbol.recordCount);
+        setCountCache(new Map());
+      }
     },
-    [selectedSymbol, pageSize, sorts, executeQueryWithFiltersAndSorts, loadFilterOptions]
+    [selectedSymbol, materializedTableName, runCountQuery]
   );
 
   const handleSortsChange = useCallback(
-    async (newSorts: ColumnSort[]) => {
+    (newSorts: ColumnSort[]) => {
       if (!selectedSymbol) return;
       setSorts(newSorts);
-      setPageIndex(0);
-      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, filters, newSorts);
+      setScrollToRowIndex(null);
+      // Hook auto-resets on sort change
     },
-    [selectedSymbol, pageSize, filters, executeQueryWithFiltersAndSorts]
+    [selectedSymbol]
   );
 
   const handleResetFilters = useCallback(
-    async () => {
+    () => {
       if (!selectedSymbol) return;
       setFilters([]);
       setSorts([]);
-      setPageIndex(0);
-      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, pageSize, [], []);
-      // Reload filter options with no filters
-      loadFilterOptions(selectedSymbol.name, []);
+      setScrollToRowIndex(null);
+      setCountCache(new Map());
+      // Restore unfiltered total
+      setTotalRows(selectedSymbol.recordCount);
+      // Hook auto-resets
     },
-    [selectedSymbol, pageSize, executeQueryWithFiltersAndSorts, loadFilterOptions]
+    [selectedSymbol]
   );
 
   const handleSymbolSelect = useCallback(
     async (symbol: GdxSymbol) => {
       setSelectedSymbol(symbol);
-      setPageIndex(0);
       setFilters([]);
       setSorts([]);
       setDomainValues(new Map());
       setCountCache(new Map());
       setHighlightedRowKey(null);
       setHighlightedColumnName(null);
+      setScrollToRowIndex(null);
       setMaterializationStatus('idle');
       setMaterializationProgress(null);
+      setPreviewData(null);
+      setDomainValuesLoading(true);
       setIsLoading(true);
       setError(null);
 
@@ -531,60 +373,35 @@ export function App() {
       try {
         const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
           symbolName: symbol.name,
-          pageSize,
         });
 
         if (mat.status === 'materialized') {
-          // Already cached — full flow
+          // Already cached — set table name, hook will auto-fetch
           setMaterializedTableName(mat.tableName);
           setTotalRows(mat.totalRowCount);
+          setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
           setMaterializationStatus('materialized');
-
-          const sql = buildSqlQuery(mat.tableName!, [], [], pageSize, 0);
-          setQuery(sql);
-          const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-          setResult(queryResult);
-
-          loadFilterOptions(symbol.name, []);
+          setQuery(`SELECT * FROM "${mat.tableName}"`);
         } else {
           // Preview mode — show preview rows immediately
           setMaterializedTableName(null);
           setTotalRows(mat.totalRowCount);
           setMaterializationStatus('preview');
-          setResult({
+          setPreviewData({
             columns: mat.columns,
             rows: mat.previewRows ?? [],
-            rowCount: mat.previewRowCount ?? 0,
           });
           setQuery(`-- Preview (first ${mat.previewRowCount} rows)`);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
         setResult(null);
+        setPreviewData(null);
       } finally {
         setIsLoading(false);
       }
     },
-    [pageSize, loadFilterOptions]
-  );
-
-  const handlePageChange = useCallback(
-    async (newPageIndex: number) => {
-      if (!selectedSymbol) return;
-      setPageIndex(newPageIndex);
-      await executeQueryWithFiltersAndSorts(selectedSymbol, newPageIndex, pageSize, filters, sorts);
-    },
-    [selectedSymbol, pageSize, filters, sorts, executeQueryWithFiltersAndSorts]
-  );
-
-  const handlePageSizeChange = useCallback(
-    async (newPageSize: number) => {
-      if (!selectedSymbol) return;
-      setPageSize(newPageSize);
-      setPageIndex(0);
-      await executeQueryWithFiltersAndSorts(selectedSymbol, 0, newPageSize, filters, sorts);
-    },
-    [selectedSymbol, filters, sorts, executeQueryWithFiltersAndSorts]
+    []
   );
 
   const handleExport = useCallback(
@@ -593,7 +410,6 @@ export function App() {
       setIsExporting(true);
       setError(null);
       try {
-        // Request export path from extension (needs file picker)
         vscode.postMessage({ type: 'exportData', format, query });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Export failed');
@@ -603,11 +419,6 @@ export function App() {
     },
     [query, selectedSymbol]
   );
-
-  const handleCancelFilterLoading = useCallback(() => {
-    // Cancel is now a no-op since loading happens via individual requests
-    setIsFilterLoading(false);
-  }, []);
 
   const handleCancelMaterialization = useCallback(async () => {
     try {
@@ -652,15 +463,14 @@ export function App() {
     setSelectedSymbol(symbol);
     setFilters(locatorFilters);
     setSorts([]);
-    setPageIndex(0);
     setDomainValues(new Map());
+    setDomainValuesLoading(true);
     setCountCache(new Map());
     setHighlightedColumnName(locator.targetColumn?.trim() || null);
 
     // Materialize if needed
     const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
       symbolName: symbol.name,
-      pageSize,
     });
 
     if (mat.status !== 'materialized') {
@@ -668,24 +478,28 @@ export function App() {
       setMaterializedTableName(null);
       setTotalRows(mat.totalRowCount);
       setMaterializationStatus('preview');
-      setResult({
+      setPreviewData({
         columns: mat.columns,
         rows: mat.previewRows ?? [],
-        rowCount: mat.previewRowCount ?? 0,
       });
 
-      // Store locator with filters to apply after materialization
       pendingLocatorDuringMaterializationRef.current = locator;
       return;
     }
 
     setMaterializedTableName(mat.tableName);
     setTotalRows(mat.totalRowCount);
+    setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
     setMaterializationStatus('materialized');
 
-    const queryResult = await executeQueryWithFiltersAndSorts(symbol, 0, pageSize, locatorFilters, [], { tableName: mat.tableName! });
-    loadFilterOptionsRef.current(symbol.name, locatorFilters);
+    // Run count query for locator filters
+    if (mat.tableName && locatorFilters.length > 0) {
+      runCountQuery(mat.tableName, locatorFilters);
+    }
 
+    // The hook will auto-fetch data with the new filters.
+    // We need to find the target row after data loads.
+    // Since the hook is async, we'll use a small delay to let it populate.
     const targetDimensions = locator.focusDimensions ?? Object.fromEntries(
       locatorFilters
         .filter(filter => /^dim_\d+$/i.test(filter.columnName))
@@ -710,34 +524,39 @@ export function App() {
         })
       : [];
 
-    if (!queryResult) {
-      setHighlightedRowKey(null);
-      return;
-    }
+    // Fetch the first page directly for locator highlighting
+    const sql = buildSqlQuery(mat.tableName!, locatorFilters, [], 5000, 0);
+    try {
+      const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
 
-    if (targetDimensionEntries.length === 0) {
-      if (queryResult.rows.length === 1) {
-        const inferredKey = buildDimensionRowKey(queryResult.rows[0], symbol.dimensionCount);
-        setHighlightedRowKey(inferredKey);
+      if (targetDimensionEntries.length === 0) {
+        if (queryResult.rows.length === 1) {
+          const inferredKey = buildDimensionRowKey(queryResult.rows[0], symbol.dimensionCount);
+          setHighlightedRowKey(inferredKey);
+          setScrollToRowIndex(0);
+        } else {
+          setHighlightedRowKey(null);
+        }
+        return;
+      }
+
+      const matchedIndex = queryResult.rows.findIndex(row =>
+        targetDimensionEntries.every(([column, value]) => String(row[column] ?? '') === value)
+      );
+
+      if (matchedIndex >= 0) {
+        setHighlightedRowKey(buildDimensionRowKey(queryResult.rows[matchedIndex], symbol.dimensionCount));
+        setScrollToRowIndex(matchedIndex);
       } else {
         setHighlightedRowKey(null);
+        setRefreshNotice('No exact match found for the requested location with current filters.');
       }
-      return;
-    }
-
-    const matchedRow = queryResult.rows.find(row =>
-      targetDimensionEntries.every(([column, value]) => String(row[column] ?? '') === value)
-    );
-
-    if (matchedRow) {
-      setHighlightedRowKey(buildDimensionRowKey(matchedRow, symbol.dimensionCount));
-    } else {
+    } catch (err) {
+      console.error('[applyLocator query error]', err);
       setHighlightedRowKey(null);
-      setRefreshNotice('No exact match found for the requested location with current filters.');
     }
-  }, [symbols, selectedSymbol, executeQueryWithFiltersAndSorts, pageSize]);
+  }, [symbols, selectedSymbol, runCountQuery]);
 
-  const loadFilterOptionsRef = useRef(loadFilterOptions);
   const handleSymbolSelectRef = useRef(handleSymbolSelect);
   const refreshCurrentDocumentRef = useRef(refreshCurrentDocument);
   const applyLocatorRef = useRef(applyLocator);
@@ -747,17 +566,14 @@ export function App() {
   }, [connected]);
 
   useEffect(() => { selectedSymbolRef.current = selectedSymbol; }, [selectedSymbol]);
-  useEffect(() => { pageIndexRef.current = pageIndex; }, [pageIndex]);
-  useEffect(() => { pageSizeRef.current = pageSize; }, [pageSize]);
   useEffect(() => { filtersRef.current = filters; }, [filters]);
   useEffect(() => { sortsRef.current = sorts; }, [sorts]);
 
   useEffect(() => {
-    loadFilterOptionsRef.current = loadFilterOptions;
     handleSymbolSelectRef.current = handleSymbolSelect;
     refreshCurrentDocumentRef.current = refreshCurrentDocument;
     applyLocatorRef.current = applyLocator;
-  }, [loadFilterOptions, handleSymbolSelect, refreshCurrentDocument, applyLocator]);
+  }, [handleSymbolSelect, refreshCurrentDocument, applyLocator]);
 
   // WebSocket event listeners for background materialization
   useEffect(() => {
@@ -773,30 +589,36 @@ export function App() {
 
     const unsubComplete = wsClient.on('materializationComplete', async (data: unknown) => {
       const d = data as { tableName: string; columns: string[]; totalRowCount: number; symbolName: string };
-      setMaterializedTableName(d.tableName);
-      setTotalRows(d.totalRowCount);
-      setMaterializationStatus('materialized');
       setMaterializationProgress(null);
 
-      // Re-fetch the current page from the materialized table
       const currentSymbol = selectedSymbolRef.current;
       if (currentSymbol && currentSymbol.name === d.symbolName) {
+        // Set table name — this triggers the hook to auto-fetch first page
+        setMaterializedTableName(d.tableName);
+        setTotalRows(d.totalRowCount);
+        setResult({ columns: d.columns, rows: [], rowCount: d.totalRowCount });
+        setMaterializationStatus('materialized');
+        // Don't clear previewData here — keep it visible until infiniteData has rows
+        setQuery(`SELECT * FROM "${d.tableName}"`);
+
+        // Run count query if filters are active
         const currentFilters = filtersRef.current;
-        const currentSorts = sortsRef.current;
-        const currentPageIndex = pageIndexRef.current;
-        const currentPageSize = pageSizeRef.current;
-
-        const sql = buildSqlQuery(d.tableName, currentFilters, currentSorts, currentPageSize, currentPageIndex);
-        setQuery(sql);
-        try {
-          const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-          setResult(queryResult);
-        } catch (err) {
-          console.error('[materializationComplete re-fetch error]', err);
+        if (currentFilters.length > 0) {
+          const countSql = buildSqlQuery(d.tableName, currentFilters, [], 0, 0)
+            .replace(/^SELECT \* FROM/, 'SELECT COUNT(*) as count FROM')
+            .replace(/\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?$/i, '');
+          try {
+            const countResult = await wsClient.request<QueryResult>("executeQuery", { sql: countSql });
+            if (countResult.rows.length > 0 && countResult.rows[0].count !== undefined) {
+              const count = typeof countResult.rows[0].count === 'bigint'
+                ? Number(countResult.rows[0].count)
+                : countResult.rows[0].count as number;
+              setTotalRows(count);
+            }
+          } catch (err) {
+            console.error('[materializationComplete count query error]', err);
+          }
         }
-
-        // Load filter options now that table is materialized
-        loadFilterOptionsRef.current(d.symbolName, currentFilters);
 
         // Apply any pending locator that was queued during materialization
         const pendingLocator = pendingLocatorDuringMaterializationRef.current;
@@ -809,13 +631,20 @@ export function App() {
       }
     });
 
+    const unsubDomainValues = wsClient.on('domainValuesReady', (data: unknown) => {
+      const d = data as { symbolName: string; domainValues: Record<string, string[]> };
+      const currentSymbol = selectedSymbolRef.current;
+      if (currentSymbol && currentSymbol.name === d.symbolName) {
+        setDomainValues(new Map(Object.entries(d.domainValues)));
+        setDomainValuesLoading(false);
+      }
+    });
+
     const unsubError = wsClient.on('materializationError', (data: unknown) => {
       const d = data as { cancelled: boolean; error?: string; symbolName: string };
       if (d.cancelled) {
-        // Cancelled — keep preview data visible, don't change status
         return;
       }
-      // Real error — show notice but keep preview data visible
       setMaterializationProgress(null);
       setMaterializationStatus('preview');
       setRefreshNotice(`Materialization failed: ${d.error ?? 'Unknown error'}. Preview data is still shown.`);
@@ -824,6 +653,7 @@ export function App() {
     return () => {
       unsubProgress();
       unsubComplete();
+      unsubDomainValues();
       unsubError();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -840,7 +670,6 @@ export function App() {
             return;
           }
 
-          // Connect to WebSocket server
           try {
             await wsClient.connect(message.serverPort);
             wsClient.setDocumentId(message.documentId);
@@ -848,19 +677,15 @@ export function App() {
             initializedDocumentIdRef.current = message.documentId;
             setDocumentSource({ filePath: message.filePath, documentId: message.documentId });
 
-            // Open document on server
-            const result = await wsClient.request<{ symbols: GdxSymbol[] }>("openDocument", {
+            const initResult = await wsClient.request<{ symbols: GdxSymbol[] }>("openDocument", {
               filePath: message.filePath,
               documentId: message.documentId,
             });
 
-            const syms = result.symbols;
+            const syms = initResult.symbols;
             setSymbols(syms);
-
-            // Notify extension about symbols for tree view
             vscode.postMessage({ type: "symbolsLoaded", symbols: syms });
 
-            // Auto-select first symbol
             if (syms.length > 0) {
               const firstSymbol = syms[0];
               setSelectedSymbol(firstSymbol);
@@ -869,29 +694,22 @@ export function App() {
               try {
                 const mat = await wsClient.request<MaterializedSymbolResult>("materializeSymbol", {
                   symbolName: firstSymbol.name,
-                  pageSize: 1000,
                 });
 
                 if (mat.status === 'materialized') {
                   setMaterializedTableName(mat.tableName);
                   setTotalRows(mat.totalRowCount);
+                  setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
                   setMaterializationStatus('materialized');
-
-                  const sql = buildSqlQuery(mat.tableName!, [], [], 1000, 0);
-                  setQuery(sql);
-                  const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-                  setResult(queryResult);
-
-                  loadFilterOptionsRef.current(firstSymbol.name, []);
+                  setQuery(`SELECT * FROM "${mat.tableName}"`);
+                  // Hook auto-fetches first page; domain values arrive via event
                 } else {
-                  // Preview mode
                   setMaterializedTableName(null);
                   setTotalRows(mat.totalRowCount);
                   setMaterializationStatus('preview');
-                  setResult({
+                  setPreviewData({
                     columns: mat.columns,
                     rows: mat.previewRows ?? [],
-                    rowCount: mat.previewRowCount ?? 0,
                   });
                   setQuery(`-- Preview (first ${mat.previewRowCount} rows)`);
                 }
@@ -902,7 +720,6 @@ export function App() {
                   if (mat.status === 'materialized') {
                     await applyLocator(pending, syms, firstSymbol);
                   } else {
-                    // Queue for after materialization completes
                     pendingLocatorDuringMaterializationRef.current = pending;
                   }
                 }
@@ -927,8 +744,6 @@ export function App() {
           break;
 
         case "exportPath":
-          // Extension provided export path, execute export on server
-          // TODO: Implement export via WebSocket
           break;
 
         case "applyLocator": {
@@ -944,6 +759,9 @@ export function App() {
 
     return () => window.removeEventListener("message", handleMessage);
   }, [applyLocator]);
+
+  // Determine if we have any data to show
+  const hasData = displayColumns.length > 0 && (displayData.length > 0 || infiniteData.isLoading || isLoading);
 
   return (
     <div style={{
@@ -1029,15 +847,15 @@ export function App() {
       )}
 
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {result ? (
+        {(hasData || (displayColumns.length > 0 && displayData.length === 0)) ? (
           <DataTable
-            columns={result.columns}
-            data={result.rows}
-            pageIndex={pageIndex}
-            pageSize={pageSize}
+            columns={displayColumns}
+            data={displayData}
             totalRows={totalRows}
-            onPageChange={handlePageChange}
-            onPageSizeChange={handlePageSizeChange}
+            hasNextPage={!isInPreviewMode && infiniteData.hasNextPage}
+            isFetchingMore={infiniteData.isFetchingMore}
+            onFetchMore={infiniteData.fetchNextPage}
+            scrollToRowIndex={scrollToRowIndex}
             displayAttributes={displayAttributes}
             filters={filters}
             sorts={sorts}
@@ -1048,6 +866,7 @@ export function App() {
             highlightedRowKey={highlightedRowKey}
             highlightedColumnName={highlightedColumnName}
             isMaterialized={materializationStatus === 'materialized'}
+            domainValuesLoading={domainValuesLoading}
           />
         ) : !isLoading && !selectedSymbol ? (
           <div style={{
@@ -1066,10 +885,8 @@ export function App() {
         ) : null}
 
         <LoadingOverlay
-          isLoading={isLoading}
-          isFilterLoading={isFilterLoading}
+          isLoading={isLoading || infiniteData.isLoading}
           isRefreshing={isRefreshing}
-          onCancelFilterLoading={handleCancelFilterLoading}
           materializationStatus={materializationStatus}
           materializationProgress={materializationProgress}
           onCancelMaterialization={handleCancelMaterialization}

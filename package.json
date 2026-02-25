@@ -8,7 +8,7 @@
     "type": "git",
     "url": "https://github.com/chrispahm/gdx-viewer"
   },
-  "version": "0.1.5",
+  "version": "0.1.7",
   "engines": {
     "vscode": "^1.106.1"
   },
@@ -293,12 +293,19 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "download-extensions": "node scripts/download-extensions.js",
+    "package:vsix": "node scripts/package-vsix.js",
+    "package:vsix:all": "node scripts/package-vsix.js --all",
+    "package:vsix:universal": "node scripts/package-vsix.js --universal",
+    "publish": "node scripts/package-vsix.js --publish",
+    "publish:pre-release": "node scripts/package-vsix.js --publish --pre-release"
   },
   "dependencies": {
     "@duckdb/node-api": "^1.4.4-r.1",
     "@radix-ui/react-slot": "^1.1.0",
     "@tanstack/react-table": "^8.20.5",
+    "@tanstack/react-virtual": "^3.13.19",
     "@types/ws": "^8.18.1",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",

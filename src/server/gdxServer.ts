@@ -16,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DuckDBConnection } from '@duckdb/node-api';
 import { DuckdbService, GdxSymbol } from '../duckdb/duckdbService';
-import { ColumnFilter, FilterValue, NumericFilterState } from './filterTypes';
 
 interface ServerRequest {
   type: 'request';
@@ -55,6 +54,7 @@ interface ActiveMaterialization {
 interface GdxServerOptions {
   allowRemoteSourceLoading: boolean;
   globalStoragePath?: string;
+  extensionPath?: string;
 }
 
 export class GdxServer {
@@ -113,7 +113,7 @@ export class GdxServer {
     }
 
     this.duckdb = new DuckdbService();
-    await this.duckdb.initialize(this.dbFilePath ?? undefined);
+    await this.duckdb.initialize(this.dbFilePath ?? undefined, this.options.extensionPath);
     console.log(`[GDX Server] DuckDB initialized (${this.dbFilePath ?? ':memory:'})`);
   }
 
@@ -379,6 +379,62 @@ export class GdxServer {
     active.promise = doWork();
   }
 
+  /**
+   * Fetch domain values for all dimensions of a symbol using gdx_domain_values()
+   * on a separate background connection. Runs in parallel with materialization.
+   * Sends a 'domainValuesReady' event when done.
+   */
+  private startBackgroundDomainValues(
+    ws: WebSocket,
+    documentId: string,
+    symbolName: string,
+    localPath: string,
+    dimensionCount: number,
+  ): void {
+    if (dimensionCount <= 0) return;
+
+    const doWork = async () => {
+      let bgConn: DuckDBConnection | null = null;
+      try {
+        bgConn = await this.duckdb!.createBackgroundConnection();
+        await bgConn.run('LOAD gdx');
+
+        const escapedPath = localPath.replace(/'/g, "''");
+        const escapedSymbol = symbolName.replace(/'/g, "''");
+        const domainValues: Record<string, string[]> = {};
+
+        for (let i = 1; i <= dimensionCount; i++) {
+          try {
+            const sql = `SELECT value FROM gdx_domain_values('${escapedPath}', '${escapedSymbol}', ${i})`;
+            const result = await bgConn.run(sql);
+            const rows = await result.getRowObjectsJS();
+            domainValues[`dim_${i}`] = rows.map(row => row.value as string);
+          } catch (dimErr) {
+            console.warn(`[GDX Server] Domain values for ${symbolName} dim ${i} failed:`, dimErr instanceof Error ? dimErr.message : String(dimErr));
+          }
+        }
+
+        this.sendEvent(ws, 'domainValuesReady', {
+          documentId,
+          symbolName,
+          domainValues,
+        });
+
+        console.log(`[GDX Server] Domain values ready for ${symbolName}: ${Object.keys(domainValues).length} dimensions`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[GDX Server] Background domain values error for ${symbolName}:`, message);
+      } finally {
+        if (bgConn) {
+          try { bgConn.disconnectSync(); } catch { /* ignore */ }
+        }
+      }
+    };
+
+    // Fire and forget — no need to track or cancel (fast operation)
+    doWork();
+  }
+
   private async handleRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case 'openDocument': {
@@ -448,6 +504,12 @@ export class GdxServer {
         // Return cached info if already materialized
         const cached = doc.materializedSymbols.get(symbolName);
         if (cached) {
+          // Still send domain values (frontend clears them on symbol switch)
+          const ws = this.documentWebSockets.get(documentId);
+          const symbolInfo = doc.symbols.find(s => s.name === symbolName);
+          if (ws && symbolInfo) {
+            this.startBackgroundDomainValues(ws, documentId, symbolName, doc.localPath, symbolInfo.dimensionCount);
+          }
           return { ...cached, status: 'materialized' };
         }
 
@@ -466,10 +528,11 @@ export class GdxServer {
         const symbolInfo = doc.symbols.find(s => s.name === symbolName);
         const estimatedTotal = symbolInfo?.recordCount ?? previewResult.rowCount;
 
-        // Phase 2: Start background materialization (fire-and-forget)
+        // Phase 2: Start background materialization + domain values (fire-and-forget, parallel)
         const ws = this.documentWebSockets.get(documentId);
         if (ws) {
           this.startBackgroundMaterialization(ws, documentId, symbolName, doc, symbolInfo?.recordCount ?? 0);
+          this.startBackgroundDomainValues(ws, documentId, symbolName, doc.localPath, symbolInfo?.dimensionCount ?? 0);
         }
 
         return {
@@ -486,38 +549,6 @@ export class GdxServer {
         const documentId = params.documentId as string;
         await this.cancelMaterialization(documentId);
         return { success: true };
-      }
-
-      case 'getFilterOptions': {
-        const documentId = params.documentId as string;
-        const symbolName = params.symbolName as string;
-        const currentFilters = (params.filters ?? []) as ColumnFilter[];
-
-        const doc = this.documents.get(documentId);
-        if (!doc) {
-          throw new Error('Document not open');
-        }
-
-        const materialized = doc.materializedSymbols.get(symbolName);
-        if (!materialized) {
-          throw new Error(`Symbol '${symbolName}' is not materialized`);
-        }
-
-        const quotedTable = `"${materialized.tableName}"`;
-        const filterOptions: Record<string, string[]> = {};
-
-        // For each text column (dim_*), get distinct values with cross-filtering
-        const dimColumns = materialized.columns.filter(col => col.startsWith('dim_'));
-        for (const col of dimColumns) {
-          // Build WHERE clause excluding filters on THIS column (cross-filtering)
-          const otherFilters = currentFilters.filter(f => f.columnName !== col);
-          const whereClause = buildWhereClause(otherFilters);
-          const sql = `SELECT DISTINCT "${col}" FROM ${quotedTable}${whereClause} ORDER BY "${col}"`;
-          const result = await this.duckdb!.executeQuery(sql);
-          filterOptions[col] = result.rows.map(row => row[col] as string);
-        }
-
-        return { filterOptions };
       }
 
       case 'executeQuery': {
@@ -674,81 +705,6 @@ export class GdxServer {
     this.server.close();
     console.log('[GDX Server] Stopped');
   }
-}
-
-// --- Filter types and WHERE clause builder ---
-
-function isNumericFilter(filter: FilterValue): filter is NumericFilterState {
-  return 'exclude' in filter;
-}
-
-function buildWhereClause(filters: ColumnFilter[]): string {
-  const clauses: string[] = [];
-
-  for (const filter of filters) {
-    const { columnName, filterValue } = filter;
-
-    if (isNumericFilter(filterValue)) {
-      const conditions: string[] = [];
-
-      const hasDisabledSpecialValues =
-        !filterValue.showEPS ||
-        !filterValue.showNA ||
-        !filterValue.showPosInf ||
-        !filterValue.showNegInf ||
-        !filterValue.showUNDF;
-
-      if (!hasDisabledSpecialValues && filterValue.min === undefined && filterValue.max === undefined) {
-        continue;
-      }
-
-      const excludedSpecialValues: string[] = [];
-      if (!filterValue.showEPS) { excludedSpecialValues.push('EPS'); }
-      if (!filterValue.showNA) { excludedSpecialValues.push('NA'); }
-      if (!filterValue.showUNDF) { excludedSpecialValues.push('UNDF'); }
-
-      if (!filterValue.showPosInf) {
-        excludedSpecialValues.push('+INF');
-        conditions.push(`"${columnName}" != CAST('Infinity' AS DOUBLE)`);
-      }
-      if (!filterValue.showNegInf) {
-        excludedSpecialValues.push('-INF');
-        conditions.push(`"${columnName}" != CAST('-Infinity' AS DOUBLE)`);
-      }
-
-      if (excludedSpecialValues.length > 0) {
-        const excludeList = excludedSpecialValues.map(v => `'${v}'`).join(', ');
-        conditions.push(`CAST("${columnName}" AS VARCHAR) NOT IN (${excludeList})`);
-      }
-
-      if (filterValue.min !== undefined) {
-        conditions.push(`"${columnName}" >= ${filterValue.min}`);
-      }
-      if (filterValue.max !== undefined) {
-        conditions.push(`"${columnName}" <= ${filterValue.max}`);
-      }
-
-      if (conditions.length > 0) {
-        let clause = conditions.join(' AND ');
-        if (filterValue.exclude) {
-          clause = `NOT (${clause})`;
-        }
-        clauses.push(`(${clause})`);
-      }
-    } else {
-      // Text filter
-      if (filterValue.selectedValues.length === 0) {
-        continue;
-      }
-      const valueList = filterValue.selectedValues.map((v: string) => `'${v.replace(/'/g, "''")}'`).join(', ');
-      clauses.push(`"${columnName}" IN (${valueList})`);
-    }
-  }
-
-  if (clauses.length === 0) {
-    return '';
-  }
-  return ` WHERE ${clauses.join(' AND ')}`;
 }
 
 function isFatalDuckDbError(message: string): boolean {

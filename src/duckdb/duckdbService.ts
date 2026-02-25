@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import { DuckDBInstance, DuckDBConnection } from '@duckdb/node-api';
 
 export interface CancellationToken {
@@ -27,15 +28,27 @@ export interface QueryResult {
   rowCount: number;
 }
 
+// DuckDB platform name for the current OS/arch
+const DUCKDB_PLATFORM_MAP: Record<string, string> = {
+  'darwin-arm64': 'osx_arm64',
+  'darwin-x64': 'osx_amd64',
+  'linux-x64': 'linux_amd64',
+  'win32-x64': 'windows_amd64',
+};
+
 export class DuckdbService {
   private instance: DuckDBInstance | null = null;
   private conn: DuckDBConnection | null = null;
   private tempDir: string | null = null;
   private dbPath: string = ':memory:';
+  private extensionPath: string | undefined;
 
-  async initialize(dbPath?: string): Promise<void> {
+  async initialize(dbPath?: string, extensionPath?: string): Promise<void> {
     if (dbPath !== undefined) {
       this.dbPath = dbPath;
+    }
+    if (extensionPath !== undefined) {
+      this.extensionPath = extensionPath;
     }
 
     const t0 = performance.now();
@@ -48,17 +61,9 @@ export class DuckdbService {
     this.conn = await this.instance.connect();
     console.log(`[DuckDB] [${elapsed()}] Connection established`);
 
-    // Enable Excel export (requires excel extension)
-    console.log(`[DuckDB] [${elapsed()}] Installing excel extension...`);
-    await this.conn.run('INSTALL excel');
-    await this.conn.run('LOAD excel');
-    console.log(`[DuckDB] [${elapsed()}] Excel extension loaded`);
-
-    // Load the GDX community extension
-    console.log(`[DuckDB] [${elapsed()}] Installing gdx extension from community...`);
-    await this.conn.run('INSTALL gdx FROM community');
-    await this.conn.run('LOAD gdx');
-    console.log(`[DuckDB] [${elapsed()}] GDX extension loaded`);
+    // Load extensions — try bundled files first, fall back to network install
+    await this.loadExtension('excel', elapsed);
+    await this.loadExtension('gdx', elapsed);
 
     // Warmup query to trigger any lazy initialization
     await this.conn.run('SELECT 1');
@@ -72,6 +77,75 @@ export class DuckdbService {
       console.log(`- ${row.extension_name}: ${row.extension_version}\n`);
     }
     console.log(`[DuckDB] [${elapsed()}] Initialization complete`);
+  }
+
+  /**
+   * Try to LOAD an extension from the bundled path. If the bundled file doesn't
+   * exist (dev mode), fall back to INSTALL + LOAD from the network.
+   */
+  private async loadExtension(name: string, elapsed: () => string): Promise<void> {
+    if (!this.conn) {
+      throw new Error('DuckDB not initialized');
+    }
+
+    const bundledPath = this.findBundledExtension(name);
+    if (bundledPath) {
+      console.log(`[DuckDB] [${elapsed()}] Loading bundled ${name} extension from ${bundledPath}...`);
+      await this.conn.run(`LOAD '${bundledPath.replace(/'/g, "''")}'`);
+      console.log(`[DuckDB] [${elapsed()}] ${name} extension loaded (bundled)`);
+      return;
+    }
+
+    // Fallback: network install
+    console.log(`[DuckDB] [${elapsed()}] Bundled ${name} extension not found, installing from network...`);
+    if (name === 'gdx') {
+      await this.conn.run('INSTALL gdx FROM community');
+    } else {
+      await this.conn.run(`INSTALL ${name}`);
+    }
+    await this.conn.run(`LOAD ${name}`);
+    console.log(`[DuckDB] [${elapsed()}] ${name} extension loaded (network)`);
+  }
+
+  /**
+   * Resolve the path to a bundled .duckdb_extension file, or return undefined
+   * if no bundled copy exists.
+   *
+   * Layout inside the VSIX:
+   *   Platform-specific build: duckdb-extensions/bundle/<name>.duckdb_extension
+   *   Universal build:         duckdb-extensions/bundle/<platform>/<name>.duckdb_extension
+   */
+  private findBundledExtension(name: string): string | undefined {
+    if (!this.extensionPath) {
+      return undefined;
+    }
+
+    const bundleDir = path.join(this.extensionPath, 'duckdb-extensions', 'bundle');
+    const fileName = `${name}.duckdb_extension`;
+
+    // Platform-specific build (flat)
+    const flat = path.join(bundleDir, fileName);
+    try {
+      fsSync.accessSync(flat);
+      return flat;
+    } catch {
+      // Not found — try universal layout
+    }
+
+    // Universal build (nested by platform)
+    const platformKey = `${process.platform}-${process.arch}`;
+    const duckdbPlatform = DUCKDB_PLATFORM_MAP[platformKey];
+    if (duckdbPlatform) {
+      const nested = path.join(bundleDir, duckdbPlatform, fileName);
+      try {
+        fsSync.accessSync(nested);
+        return nested;
+      } catch {
+        // Not found
+      }
+    }
+
+    return undefined;
   }
 
   async registerFile(source: string, bytes?: Uint8Array): Promise<string> {
@@ -260,7 +334,7 @@ export class DuckdbService {
       this.instance = null;
     }
     // Do NOT delete tempDir — remote files must survive reinitialize
-    // Reuses stored dbPath from the original initialize() call
+    // Reuses stored dbPath and extensionPath from the original initialize() call
     await this.initialize();
   }
 

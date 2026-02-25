@@ -5,20 +5,21 @@ import {
   type ColumnDef,
   type SortingState,
 } from "@tanstack/react-table";
-import { useState, useMemo, useCallback } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { NumericFilter, type NumericFilterState } from "./NumericFilter";
 import { TextFilter } from "./TextFilter";
 import type { DisplayAttributes } from "./AttributesPanel";
-import type { ColumnFilter, ColumnSort } from "../App";
+import type { ColumnFilter, ColumnSort } from "../lib/sqlBuilder";
 
 interface DataTableProps {
   columns: string[];
   data: Record<string, unknown>[];
-  pageIndex: number;
-  pageSize: number;
   totalRows: number;
-  onPageChange: (pageIndex: number) => void;
-  onPageSizeChange: (pageSize: number) => void;
+  hasNextPage: boolean;
+  isFetchingMore: boolean;
+  onFetchMore: () => void;
+  scrollToRowIndex?: number | null;
   displayAttributes: DisplayAttributes;
   filters: ColumnFilter[];
   sorts: ColumnSort[];
@@ -29,52 +30,53 @@ interface DataTableProps {
   highlightedRowKey?: string | null;
   highlightedColumnName?: string | null;
   isMaterialized?: boolean;
+  domainValuesLoading?: boolean;
 }
 const SUPERSCRIPTS = {
-  '0': '⁰',
-  '1': '¹',
-  '2': '²',
-  '3': '³',
-  '4': '⁴',
-  '5': '⁵',
-  '6': '⁶',
-  '7': '⁷',
-  '8': '⁸',
-  '9': '⁹',
-  '+': '⁺',
-  '-': '⁻',
-  'a': 'ᵃ',
-  'b': 'ᵇ',
-  'c': 'ᶜ',
-  'd': 'ᵈ',
-  'e': 'ᵉ',
-  'f': 'ᶠ',
-  'g': 'ᵍ',
-  'h': 'ʰ',
-  'i': 'ⁱ',
-  'j': 'ʲ',
-  'k': 'ᵏ',
-  'l': 'ˡ',
-  'm': 'ᵐ',
-  'n': 'ⁿ',
-  'o': 'ᵒ',
-  'p': 'ᵖ',
-  'r': 'ʳ',
-  's': 'ˢ',
-  't': 'ᵗ',
-  'u': 'ᵘ',
-  'v': 'ᵛ',
-  'w': 'ʷ',
-  'x': 'ˣ',
-  'y': 'ʸ',
-  'z': 'ᶻ'
+  '0': '\u2070',
+  '1': '\u00b9',
+  '2': '\u00b2',
+  '3': '\u00b3',
+  '4': '\u2074',
+  '5': '\u2075',
+  '6': '\u2076',
+  '7': '\u2077',
+  '8': '\u2078',
+  '9': '\u2079',
+  '+': '\u207a',
+  '-': '\u207b',
+  'a': '\u1d43',
+  'b': '\u1d47',
+  'c': '\u1d9c',
+  'd': '\u1d48',
+  'e': '\u1d49',
+  'f': '\u1da0',
+  'g': '\u1d4d',
+  'h': '\u02b0',
+  'i': '\u2071',
+  'j': '\u02b2',
+  'k': '\u1d4f',
+  'l': '\u02e1',
+  'm': '\u1d50',
+  'n': '\u207f',
+  'o': '\u1d52',
+  'p': '\u1d56',
+  'r': '\u02b3',
+  's': '\u02e2',
+  't': '\u1d57',
+  'u': '\u1d58',
+  'v': '\u1d5b',
+  'w': '\u02b7',
+  'x': '\u02e3',
+  'y': '\u02b8',
+  'z': '\u1dbb'
 }
 
 function superScriptNumber(num: number, base: number = 10): string {
   var numStr = num.toString(base)
-  if (numStr === 'NaN') { return 'ᴺᵃᴺ' }
-  if (numStr === 'Infinity') { return '⁺ᴵⁿᶠ' }
-  if (numStr === '-Infinity') { return '⁻ᴵⁿᶠ' }
+  if (numStr === 'NaN') { return '\u1d3a\u1d43\u1d3a' }
+  if (numStr === 'Infinity') { return '\u207a\u1d35\u207f\u1da0' }
+  if (numStr === '-Infinity') { return '\u207b\u1d35\u207f\u1da0' }
   return numStr.split('').map(function (c) {
     var supc = SUPERSCRIPTS[c as keyof typeof SUPERSCRIPTS]
     if (supc) {
@@ -183,6 +185,8 @@ function formatCellValue(
   return { display: String(value), isSpecial: false };
 }
 
+const ROW_HEIGHT = 24;
+
 const styles = {
   container: {
     display: 'flex',
@@ -206,7 +210,7 @@ const styles = {
     zIndex: 10,
   },
   th: {
-    padding: '4px 8px',
+    padding: '2px 6px',
     textAlign: 'left' as const,
     fontWeight: 500,
     color: 'var(--vscode-foreground)',
@@ -217,7 +221,7 @@ const styles = {
   headerContent: {
     display: 'flex',
     flexDirection: 'column' as const,
-    gap: '4px',
+    gap: '2px',
   },
   headerButton: {
     display: 'inline-flex',
@@ -225,7 +229,7 @@ const styles = {
     gap: '4px',
     background: 'none',
     border: 'none',
-    padding: '4px 8px',
+    padding: '2px 6px',
     cursor: 'pointer',
     fontFamily: 'var(--vscode-font-family)',
     fontSize: 'var(--vscode-font-size)',
@@ -237,7 +241,7 @@ const styles = {
     borderBottom: '1px solid var(--vscode-panel-border, transparent)',
   },
   td: {
-    padding: '6px 12px',
+    padding: '2px 6px',
     verticalAlign: 'middle' as const,
   },
   tdSpecial: {
@@ -253,17 +257,17 @@ const styles = {
     padding: '24px',
     color: 'var(--vscode-descriptionForeground)',
   },
-  pagination: {
+  statusBar: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '8px 12px',
+    padding: '4px 8px',
     borderTop: '1px solid var(--vscode-panel-border, transparent)',
     backgroundColor: 'var(--vscode-editorWidget-background)',
     gap: '12px',
     flexWrap: 'wrap' as const,
   },
-  pageInfo: {
+  statusInfo: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
@@ -271,43 +275,16 @@ const styles = {
     color: 'var(--vscode-descriptionForeground)',
     flexWrap: 'wrap' as const,
   },
-  select: {
-    backgroundColor: 'var(--vscode-dropdown-background)',
-    color: 'var(--vscode-dropdown-foreground)',
-    border: '1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, transparent))',
-    borderRadius: '3px',
-    padding: '2px 6px',
-    fontFamily: 'var(--vscode-font-family)',
-    fontSize: 'var(--vscode-font-size)',
-  },
-  pageButtons: {
-    display: 'flex',
-    gap: '4px',
-  },
-  pageButton: {
-    padding: '4px 8px',
-    backgroundColor: 'var(--vscode-button-secondaryBackground)',
-    color: 'var(--vscode-button-secondaryForeground)',
-    border: 'none',
-    borderRadius: '3px',
-    cursor: 'pointer',
-    fontFamily: 'var(--vscode-font-family)',
-    fontSize: 'var(--vscode-font-size)',
-  },
-  pageButtonDisabled: {
-    opacity: 0.5,
-    cursor: 'not-allowed',
-  },
 };
 
 export function DataTable({
   columns,
   data,
-  pageIndex,
-  pageSize,
   totalRows,
-  onPageChange,
-  onPageSizeChange,
+  hasNextPage,
+  isFetchingMore,
+  onFetchMore,
+  scrollToRowIndex,
   displayAttributes,
   filters,
   sorts,
@@ -318,8 +295,10 @@ export function DataTable({
   highlightedRowKey,
   highlightedColumnName,
   isMaterialized = true,
+  domainValuesLoading = false,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
+  const parentRef = useRef<HTMLDivElement>(null);
 
   // Convert ColumnSort[] to SortingState for display purposes
   useMemo(() => {
@@ -337,7 +316,6 @@ export function DataTable({
   );
 
   // Compute unique values for text columns from current data as fallback
-  // This provides filter options if domain values haven't loaded yet
   const columnUniqueValues = useMemo(() => {
     const values: Record<string, Set<string>> = {};
     visibleColumns.forEach(col => {
@@ -371,10 +349,8 @@ export function DataTable({
     if (!isMaterialized) return;
     let newFilters: ColumnFilter[];
     if (filterValue === undefined) {
-      // Remove filter
       newFilters = filters.filter(f => f.columnName !== columnName);
     } else {
-      // Add or update filter
       const existingIndex = filters.findIndex(f => f.columnName === columnName);
       if (existingIndex >= 0) {
         newFilters = [...filters];
@@ -406,29 +382,31 @@ export function DataTable({
     let newSorts: ColumnSort[];
 
     if (!currentSort) {
-      // Add ascending sort
       newSorts = [{ columnName, direction: 'asc' }];
     } else if (currentSort.direction === 'asc') {
-      // Change to descending
       newSorts = [{ columnName, direction: 'desc' }];
     } else {
-      // Remove sort
       newSorts = [];
     }
 
     onSortsChange(newSorts);
   }, [sorts, getColumnSort, onSortsChange, isMaterialized]);
 
+  // Cache column numeric/text type to prevent flip-flopping when data briefly becomes empty
+  const columnTypesRef = useRef<Record<string, boolean>>({});
+  const getIsNumeric = useCallback((col: string) => {
+    if (data.length > 0) {
+      columnTypesRef.current[col] = isNumericColumn(data, col);
+    }
+    return columnTypesRef.current[col] ?? false;
+  }, [data]);
+
   // Helper to get domain values for a column with robust name matching
   const getDomainValuesForColumn = useCallback((columnName: string) => {
-    // Try exact match first
     if (domainValues.has(columnName)) {
       return domainValues.get(columnName);
     }
 
-    // Check matching by column index
-    // GDX reader usually returns columns in order: dim_1, dim_2, ..., dim_n, value columns
-    // The domain values are keyed by "dim_1", "dim_2", etc.
     const columnIndex = columns.indexOf(columnName);
     if (columnIndex !== -1 && columnIndex < dimensionCount) {
       const normalizedKey = `dim_${columnIndex + 1}`;
@@ -437,7 +415,6 @@ export function DataTable({
       }
     }
 
-    // Check for dimension named "dim_X" explicitly (fallback)
     const dimMatch = columnName.match(/dim_?(\d+)/i);
     if (dimMatch) {
       const dimIndex = dimMatch[1];
@@ -450,9 +427,9 @@ export function DataTable({
     return undefined;
   }, [domainValues, columns, dimensionCount]);
 
-  const tableColumns: ColumnDef<Record<string, unknown>>[] = visibleColumns.map(
+  const tableColumns: ColumnDef<Record<string, unknown>>[] = useMemo(() => visibleColumns.map(
     (col) => {
-      const isNumeric = isNumericColumn(data, col);
+      const isNumeric = getIsNumeric(col);
       const displayName = formatColumnName(col);
 
       return {
@@ -478,7 +455,7 @@ export function DataTable({
               >
                 {displayName}
                 <span style={{ opacity: currentSort ? 1 : 0.3 }}>
-                  {currentSort?.direction === "asc" ? "↑" : currentSort?.direction === "desc" ? "↓" : "↕"}
+                  {currentSort?.direction === "asc" ? "\u2191" : currentSort?.direction === "desc" ? "\u2193" : "\u2195"}
                 </span>
               </button>
               {isNumeric ? (
@@ -495,6 +472,7 @@ export function DataTable({
                   uniqueValues={getDomainValuesForColumn(col) || Array.from(columnUniqueValues[col] || []).sort()}
                   currentFilter={(currentFilter as any)?.selectedValues}
                   onFilterChange={(name, values) => handleFilterChange(name, values)}
+                  domainValuesLoading={domainValuesLoading}
                 />
               )}
             </div>
@@ -514,7 +492,9 @@ export function DataTable({
         },
       };
     }
-  );
+  ), [visibleColumns, getIsNumeric, getDomainValuesForColumn, columnUniqueValues,
+      getColumnFilter, getColumnSort, handleFilterChange, handleSortChange,
+      isMaterialized, displayAttributes, domainValuesLoading]);
 
   const table = useReactTable({
     data,
@@ -524,14 +504,47 @@ export function DataTable({
     state: {
       sorting,
     },
-    manualPagination: true,
     manualSorting: true,
     manualFiltering: true,
   });
 
-  const totalPages = Math.ceil(totalRows / pageSize);
-  const canPreviousPage = isMaterialized && pageIndex > 0;
-  const canNextPage = isMaterialized && pageIndex < totalPages - 1;
+  const allRows = table.getRowModel().rows;
+
+  // Virtualizer for rows
+  const rowVirtualizer = useVirtualizer({
+    count: hasNextPage ? allRows.length + 1 : allRows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 20,
+  });
+
+  // Scroll to top when filters/sorts change
+  const prevFiltersRef = useRef(filters);
+  const prevSortsRef = useRef(sorts);
+  useEffect(() => {
+    if (prevFiltersRef.current !== filters || prevSortsRef.current !== sorts) {
+      prevFiltersRef.current = filters;
+      prevSortsRef.current = sorts;
+      rowVirtualizer.scrollToOffset(0);
+    }
+  }, [filters, sorts, rowVirtualizer]);
+
+  // Handle scrollToRowIndex
+  useEffect(() => {
+    if (scrollToRowIndex != null && scrollToRowIndex >= 0) {
+      rowVirtualizer.scrollToIndex(scrollToRowIndex, { align: 'center' });
+    }
+  }, [scrollToRowIndex, rowVirtualizer]);
+
+  // Fetch more when scrolling near the end
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  useEffect(() => {
+    if (!hasNextPage || isFetchingMore || virtualItems.length === 0) return;
+    const lastItem = virtualItems[virtualItems.length - 1];
+    if (lastItem && lastItem.index >= allRows.length - 30) {
+      onFetchMore();
+    }
+  }, [virtualItems, hasNextPage, isFetchingMore, allRows.length, onFetchMore]);
 
   const buildDimensionRowKey = useCallback((row: Record<string, unknown>): string | null => {
     if (dimensionCount <= 0) {
@@ -550,6 +563,8 @@ export function DataTable({
     return parts.join('|');
   }, [dimensionCount]);
 
+  const totalSize = rowVirtualizer.getTotalSize();
+
   return (
     <div style={styles.container}>
       {!isMaterialized && (
@@ -561,10 +576,10 @@ export function DataTable({
           fontFamily: 'var(--vscode-font-family)',
           borderBottom: '1px solid var(--vscode-panel-border, transparent)',
         }}>
-          Showing preview &mdash; sorting, filtering, and pagination available after loading completes
+          Showing preview &mdash; sorting and filtering available after loading completes
         </div>
       )}
-      <div style={styles.tableWrapper}>
+      <div ref={parentRef} style={styles.tableWrapper}>
         <table style={styles.table}>
           <thead style={styles.thead}>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -583,20 +598,50 @@ export function DataTable({
             ))}
           </thead>
           <tbody>
-            {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row, idx) => (
-                (() => {
+            {allRows.length > 0 ? (
+              <>
+                {/* Top spacer */}
+                {virtualItems.length > 0 && virtualItems[0].start > 0 && (
+                  <tr>
+                    <td
+                      colSpan={visibleColumns.length}
+                      style={{ height: virtualItems[0].start, padding: 0, border: 'none' }}
+                    />
+                  </tr>
+                )}
+                {/* Visible rows */}
+                {virtualItems.map((virtualRow) => {
+                  // Sentinel row for "loading more..."
+                  if (virtualRow.index >= allRows.length) {
+                    return (
+                      <tr key="loading-sentinel" style={{ height: ROW_HEIGHT }}>
+                        <td
+                          colSpan={visibleColumns.length}
+                          style={{
+                            ...styles.td,
+                            textAlign: 'center',
+                            color: 'var(--vscode-descriptionForeground)',
+                          }}
+                        >
+                          {isFetchingMore ? 'Loading more...' : ''}
+                        </td>
+                      </tr>
+                    );
+                  }
+
+                  const row = allRows[virtualRow.index];
                   const rowKey = buildDimensionRowKey(row.original);
                   const isHighlightedRow = !!highlightedRowKey && rowKey === highlightedRowKey;
                   const baseRowBackground = isHighlightedRow
                     ? 'var(--vscode-list-activeSelectionBackground)'
-                    : (idx % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)');
+                    : (virtualRow.index % 2 === 0 ? 'transparent' : 'var(--vscode-list-hoverBackground)');
 
                   return (
                     <tr
                       key={row.id}
                       style={{
                         ...styles.tr,
+                        height: ROW_HEIGHT,
                         backgroundColor: baseRowBackground,
                       }}
                       onMouseEnter={(e) => {
@@ -630,8 +675,21 @@ export function DataTable({
                       })}
                     </tr>
                   );
-                })()
-              ))
+                })}
+                {/* Bottom spacer */}
+                {virtualItems.length > 0 && (
+                  <tr>
+                    <td
+                      colSpan={visibleColumns.length}
+                      style={{
+                        height: totalSize - (virtualItems[virtualItems.length - 1].end),
+                        padding: 0,
+                        border: 'none',
+                      }}
+                    />
+                  </tr>
+                )}
+              </>
             ) : (
               <tr>
                 <td colSpan={visibleColumns.length} style={styles.emptyRow}>
@@ -642,74 +700,18 @@ export function DataTable({
           </tbody>
         </table>
       </div>
-      <div style={styles.pagination}>
-        <div style={styles.pageInfo}>
-          <span>Page {pageIndex + 1} of {totalPages || 1}</span>
-          <span>·</span>
+      <div style={styles.statusBar}>
+        <div style={styles.statusInfo}>
           <span>
-            {filters.length > 0
-              ? `${data.length} rows on page (filtered)`
-              : `${totalRows.toLocaleString()} total rows`
-            }
+            {data.length.toLocaleString()} of {totalRows.toLocaleString()} rows{' '}
+            {filters.length > 0 ? '(filtered)' : 'loaded'}
           </span>
-          <span>·</span>
-          <select
-            value={pageSize}
-            onChange={(e) => isMaterialized && onPageSizeChange(Number(e.target.value))}
-            disabled={!isMaterialized}
-            style={{
-              ...styles.select,
-              ...(!isMaterialized ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
-            }}
-          >
-            {[1000, 10000, 50000].map((size) => (
-              <option key={size} value={size}>
-                {size} rows
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={styles.pageButtons}>
-          <button
-            style={{
-              ...styles.pageButton,
-              ...(canPreviousPage ? {} : styles.pageButtonDisabled),
-            }}
-            onClick={() => canPreviousPage && onPageChange(0)}
-            disabled={!canPreviousPage}
-          >
-            First
-          </button>
-          <button
-            style={{
-              ...styles.pageButton,
-              ...(canPreviousPage ? {} : styles.pageButtonDisabled),
-            }}
-            onClick={() => canPreviousPage && onPageChange(pageIndex - 1)}
-            disabled={!canPreviousPage}
-          >
-            Previous
-          </button>
-          <button
-            style={{
-              ...styles.pageButton,
-              ...(canNextPage ? {} : styles.pageButtonDisabled),
-            }}
-            onClick={() => canNextPage && onPageChange(pageIndex + 1)}
-            disabled={!canNextPage}
-          >
-            Next
-          </button>
-          <button
-            style={{
-              ...styles.pageButton,
-              ...(canNextPage ? {} : styles.pageButtonDisabled),
-            }}
-            onClick={() => canNextPage && onPageChange(totalPages - 1)}
-            disabled={!canNextPage}
-          >
-            Last
-          </button>
+          {isFetchingMore && (
+            <>
+              <span>&middot;</span>
+              <span>Loading more...</span>
+            </>
+          )}
         </div>
       </div>
     </div>
