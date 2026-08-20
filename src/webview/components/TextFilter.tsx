@@ -178,6 +178,10 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
     ? filteredValues.filter((v) => selectedValues.has(v))
     : filteredValues;
 
+  // While a search term is entered, the bulk actions act on the matches only —
+  // acting on all values would silently ignore what the user typed.
+  const isSearching = searchTerm.trim().length > 0;
+
   // Calculate dropdown position when opening
   useEffect(() => {
     if (isOpen && buttonRef.current) {
@@ -215,6 +219,8 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
   // Sync selectedValues with filter value when opening
   useEffect(() => {
     if (isOpen) {
+      // Start from a clean search box, otherwise a stale term hides values
+      setSearchTerm("");
       if (filterValue.length > 0) {
         setSelectedValues(new Set(filterValue));
       } else {
@@ -234,10 +240,25 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
   };
 
   const selectAll = () => {
-    setSelectedValues(new Set(uniqueValues));
+    // With a search active this becomes "select the matches" — the selection is
+    // replaced by them, so Apply filters down to what was typed.
+    setSelectedValues(new Set(isSearching ? filteredValues : uniqueValues));
   };
 
   const invertSelection = () => {
+    if (isSearching) {
+      const newSet = new Set(selectedValues);
+      filteredValues.forEach((v) => {
+        if (newSet.has(v)) {
+          newSet.delete(v);
+        } else {
+          newSet.add(v);
+        }
+      });
+      setSelectedValues(newSet);
+      return;
+    }
+
     const newSet = new Set<string>();
     uniqueValues.forEach((v) => {
       if (!selectedValues.has(v)) {
@@ -248,17 +269,43 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
   };
 
   const deselectAll = () => {
+    if (isSearching) {
+      const newSet = new Set(selectedValues);
+      filteredValues.forEach((v) => newSet.delete(v));
+      setSelectedValues(newSet);
+      return;
+    }
     setSelectedValues(new Set());
   };
 
-  const handleApply = () => {
+  const applySelection = (values: Set<string>) => {
     // If all values selected, clear filter
-    if (selectedValues.size === uniqueValues.length) {
+    if (values.size === uniqueValues.length) {
       onFilterChange(columnName, undefined);
     } else {
-      onFilterChange(columnName, Array.from(selectedValues));
+      onFilterChange(columnName, Array.from(values));
     }
     setIsOpen(false);
+  };
+
+  const handleApply = () => {
+    applySelection(selectedValues);
+  };
+
+  // Enter in the search box filters straight down to the matches, which is what
+  // typing a value name implies.
+  const handleSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      setIsOpen(false);
+      return;
+    }
+    if (event.key !== 'Enter' || !isSearching || filteredValues.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    const matches = new Set(filteredValues);
+    setSelectedValues(matches);
+    applySelection(matches);
   };
 
   if (uniqueValues.length === 0) {
@@ -313,9 +360,10 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
           <div style={styles.searchRow}>
             <input
               type="text"
-              placeholder="Filter ..."
+              placeholder="Search values, Enter to apply"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
               style={styles.searchInput}
               autoFocus
             />
@@ -378,7 +426,7 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
                 e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryBackground)';
               }}
             >
-              Select All
+              {isSearching ? 'Select Matches' : 'Select All'}
             </button>
             <button
               style={styles.actionButton}
@@ -390,7 +438,7 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
                 e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryBackground)';
               }}
             >
-              Invert
+              {isSearching ? 'Invert Matches' : 'Invert'}
             </button>
             <button
               style={styles.actionButton}
@@ -402,7 +450,7 @@ export function TextFilter({ columnName, uniqueValues, currentFilter, onFilterCh
                 e.currentTarget.style.backgroundColor = 'var(--vscode-button-secondaryBackground)';
               }}
             >
-              Deselect All
+              {isSearching ? 'Deselect Matches' : 'Deselect All'}
             </button>
           </div>
 
