@@ -31,6 +31,15 @@ interface QueryResult {
   rowCount: number;
 }
 
+/**
+ * Column metadata of the materialized table backing the selected symbol.
+ * It deliberately carries no rows: those stream in through useInfiniteData.
+ */
+interface SymbolTableInfo {
+  columns: string[];
+  rowCount: number;
+}
+
 interface LocatorMessage {
   type: 'applyLocator';
   symbolName?: string;
@@ -87,7 +96,11 @@ export function App() {
   const [symbols, setSymbols] = useState<GdxSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<GdxSymbol | null>(null);
   const [query, setQuery] = useState("");
-  const [result, setResult] = useState<QueryResult | null>(null);
+  // Column metadata of the materialized table for the selected symbol.
+  const [tableInfo, setTableInfo] = useState<SymbolTableInfo | null>(null);
+  // Result of a query typed into the SQL toolbar. Kept separate from tableInfo
+  // because it replaces the table view entirely - its columns *and* its rows.
+  const [customQueryResult, setCustomQueryResult] = useState<QueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -139,12 +152,19 @@ export function App() {
   // filter components from unmounting during the preview→materialized transition.
   const isInPreviewMode = materializationStatus !== 'materialized' && materializationStatus !== 'idle';
   const useInfinite = materializationStatus === 'materialized' && infiniteData.rows.length > 0;
-  const displayColumns = useInfinite
-    ? (result?.columns ?? [])
-    : (previewData ? previewData.columns : (result?.columns ?? []));
-  const displayData = useInfinite
-    ? infiniteData.rows
-    : (previewData ? previewData.rows : infiniteData.rows);
+  // A custom query result replaces the table view completely. Taking only its
+  // columns while the rows kept coming from useInfiniteData is what used to render
+  // the query's headers on top of the full table's rows.
+  const displayColumns = customQueryResult
+    ? customQueryResult.columns
+    : useInfinite
+      ? (tableInfo?.columns ?? [])
+      : (previewData ? previewData.columns : (tableInfo?.columns ?? []));
+  const displayData = customQueryResult
+    ? customQueryResult.rows
+    : useInfinite
+      ? infiniteData.rows
+      : (previewData ? previewData.rows : infiniteData.rows);
 
   // Clear preview data once infinite data has loaded its first page
   useEffect(() => {
@@ -152,6 +172,13 @@ export function App() {
       setPreviewData(null);
     }
   }, [materializationStatus, infiniteData.rows.length, previewData]);
+
+  // A custom query result is only valid for the symbol, table and filter/sort
+  // context it was executed against. Drop it as soon as that context changes so the
+  // grid falls back to the materialized table instead of showing stale query rows.
+  useEffect(() => {
+    setCustomQueryResult(null);
+  }, [selectedSymbol, materializedTableName, filters, sorts, materializationStatus]);
 
   // Run count query when filters are active
   const runCountQuery = useCallback(async (tableName: string, currentFilters: ColumnFilter[]) => {
@@ -198,10 +225,10 @@ export function App() {
 
     try {
       const queryResult = await wsClient.request<QueryResult>("executeQuery", { sql });
-      setResult(queryResult);
+      setCustomQueryResult(queryResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query failed");
-      setResult(null);
+      setCustomQueryResult(null);
     } finally {
       setIsLoading(false);
     }
@@ -231,7 +258,8 @@ export function App() {
       if (nextSymbols.length === 0) {
         setSelectedSymbol(null);
         setMaterializedTableName(null);
-        setResult(null);
+        setTableInfo(null);
+        setCustomQueryResult(null);
         setPreviewData(null);
         setTotalRows(0);
         setDomainValues(new Map());
@@ -275,7 +303,7 @@ export function App() {
       if (mat.status === 'materialized') {
         setMaterializedTableName(mat.tableName);
         setTotalRows(mat.totalRowCount);
-        setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
+        setTableInfo({ columns: mat.columns, rowCount: mat.totalRowCount });
         setMaterializationStatus('materialized');
         // Hook auto-fetches when tableName changes + enabled becomes true
         // Also set filters/sorts so hook picks up correct state
@@ -379,7 +407,7 @@ export function App() {
           // Already cached — set table name, hook will auto-fetch
           setMaterializedTableName(mat.tableName);
           setTotalRows(mat.totalRowCount);
-          setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
+          setTableInfo({ columns: mat.columns, rowCount: mat.totalRowCount });
           setMaterializationStatus('materialized');
           setQuery(`SELECT * FROM "${mat.tableName}"`);
         } else {
@@ -395,7 +423,8 @@ export function App() {
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
-        setResult(null);
+        setTableInfo(null);
+        setCustomQueryResult(null);
         setPreviewData(null);
       } finally {
         setIsLoading(false);
@@ -489,7 +518,7 @@ export function App() {
 
     setMaterializedTableName(mat.tableName);
     setTotalRows(mat.totalRowCount);
-    setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
+    setTableInfo({ columns: mat.columns, rowCount: mat.totalRowCount });
     setMaterializationStatus('materialized');
 
     // Run count query for locator filters
@@ -596,7 +625,7 @@ export function App() {
         // Set table name — this triggers the hook to auto-fetch first page
         setMaterializedTableName(d.tableName);
         setTotalRows(d.totalRowCount);
-        setResult({ columns: d.columns, rows: [], rowCount: d.totalRowCount });
+        setTableInfo({ columns: d.columns, rowCount: d.totalRowCount });
         setMaterializationStatus('materialized');
         // Don't clear previewData here — keep it visible until infiniteData has rows
         setQuery(`SELECT * FROM "${d.tableName}"`);
@@ -699,7 +728,7 @@ export function App() {
                 if (mat.status === 'materialized') {
                   setMaterializedTableName(mat.tableName);
                   setTotalRows(mat.totalRowCount);
-                  setResult({ columns: mat.columns, rows: [], rowCount: mat.totalRowCount });
+                  setTableInfo({ columns: mat.columns, rowCount: mat.totalRowCount });
                   setMaterializationStatus('materialized');
                   setQuery(`SELECT * FROM "${mat.tableName}"`);
                   // Hook auto-fetches first page; domain values arrive via event
@@ -852,7 +881,7 @@ export function App() {
             columns={displayColumns}
             data={displayData}
             totalRows={totalRows}
-            hasNextPage={!isInPreviewMode && infiniteData.hasNextPage}
+            hasNextPage={!isInPreviewMode && !customQueryResult && infiniteData.hasNextPage}
             isFetchingMore={infiniteData.isFetchingMore}
             onFetchMore={infiniteData.fetchNextPage}
             scrollToRowIndex={scrollToRowIndex}
@@ -866,6 +895,7 @@ export function App() {
             highlightedRowKey={highlightedRowKey}
             highlightedColumnName={highlightedColumnName}
             isMaterialized={materializationStatus === 'materialized'}
+            isCustomQuery={customQueryResult !== null}
             domainValuesLoading={domainValuesLoading}
           />
         ) : !isLoading && !selectedSymbol ? (
