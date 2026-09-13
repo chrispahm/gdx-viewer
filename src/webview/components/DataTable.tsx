@@ -30,6 +30,8 @@ interface DataTableProps {
   highlightedRowKey?: string | null;
   highlightedColumnName?: string | null;
   isMaterialized?: boolean;
+  /** True while the grid shows the result of a query typed into the SQL toolbar. */
+  isCustomQuery?: boolean;
   domainValuesLoading?: boolean;
 }
 const SUPERSCRIPTS = {
@@ -295,6 +297,7 @@ export function DataTable({
   highlightedRowKey,
   highlightedColumnName,
   isMaterialized = true,
+  isCustomQuery = false,
   domainValuesLoading = false,
 }: DataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -338,6 +341,10 @@ export function DataTable({
     return filter?.filterValue;
   }, [filters]);
 
+  // Filters and sorts are translated into SQL against the materialized table, so
+  // they only make sense while that table is what the grid shows.
+  const canFilterAndSort = isMaterialized && !isCustomQuery;
+
   // Helper to get current sort for a column
   const getColumnSort = useCallback((columnName: string) => {
     const sort = sorts.find(s => s.columnName === columnName);
@@ -346,7 +353,7 @@ export function DataTable({
 
   // Handle filter change from filter components
   const handleFilterChange = useCallback((columnName: string, filterValue: NumericFilterState | string[] | undefined) => {
-    if (!isMaterialized) return;
+    if (!canFilterAndSort) return;
     let newFilters: ColumnFilter[];
     if (filterValue === undefined) {
       newFilters = filters.filter(f => f.columnName !== columnName);
@@ -373,11 +380,11 @@ export function DataTable({
       }
     }
     onFiltersChange(newFilters);
-  }, [filters, onFiltersChange, isMaterialized]);
+  }, [filters, onFiltersChange, canFilterAndSort]);
 
   // Handle sort change from column headers
   const handleSortChange = useCallback((columnName: string) => {
-    if (!isMaterialized) return;
+    if (!canFilterAndSort) return;
     const currentSort = getColumnSort(columnName);
     let newSorts: ColumnSort[];
 
@@ -390,7 +397,7 @@ export function DataTable({
     }
 
     onSortsChange(newSorts);
-  }, [sorts, getColumnSort, onSortsChange, isMaterialized]);
+  }, [sorts, getColumnSort, onSortsChange, canFilterAndSort]);
 
   // Cache column numeric/text type to prevent flip-flopping when data briefly becomes empty
   const columnTypesRef = useRef<Record<string, boolean>>({});
@@ -443,11 +450,11 @@ export function DataTable({
               <button
                 style={{
                   ...styles.headerButton,
-                  ...(!isMaterialized ? { cursor: 'default', opacity: 0.7 } : {}),
+                  ...(!canFilterAndSort ? { cursor: 'default', opacity: 0.7 } : {}),
                 }}
                 onClick={() => handleSortChange(col)}
                 onMouseEnter={(e) => {
-                  if (isMaterialized) e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
+                  if (canFilterAndSort) e.currentTarget.style.backgroundColor = 'var(--vscode-toolbar-hoverBackground)';
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.backgroundColor = 'transparent';
@@ -494,7 +501,7 @@ export function DataTable({
     }
   ), [visibleColumns, getIsNumeric, getDomainValuesForColumn, columnUniqueValues,
       getColumnFilter, getColumnSort, handleFilterChange, handleSortChange,
-      isMaterialized, displayAttributes, domainValuesLoading]);
+      canFilterAndSort, displayAttributes, domainValuesLoading]);
 
   const table = useReactTable({
     data,
@@ -567,7 +574,19 @@ export function DataTable({
 
   return (
     <div style={styles.container}>
-      {!isMaterialized && (
+      {isCustomQuery && (
+        <div style={{
+          padding: '4px 12px',
+          backgroundColor: 'var(--vscode-editorInfo-background, var(--vscode-editorWidget-background))',
+          color: 'var(--vscode-descriptionForeground)',
+          fontSize: 'var(--vscode-font-size)',
+          fontFamily: 'var(--vscode-font-family)',
+          borderBottom: '1px solid var(--vscode-panel-border, transparent)',
+        }}>
+          Showing custom query results &mdash; select a symbol to return to the table view
+        </div>
+      )}
+      {!isCustomQuery && !isMaterialized && (
         <div style={{
           padding: '4px 12px',
           backgroundColor: 'var(--vscode-editorInfo-background, var(--vscode-editorWidget-background))',
@@ -703,8 +722,9 @@ export function DataTable({
       <div style={styles.statusBar}>
         <div style={styles.statusInfo}>
           <span>
-            {data.length.toLocaleString()} of {totalRows.toLocaleString()} rows{' '}
-            {filters.length > 0 ? '(filtered)' : 'loaded'}
+            {isCustomQuery
+              ? `${data.length.toLocaleString()} rows (query result)`
+              : `${data.length.toLocaleString()} of ${totalRows.toLocaleString()} rows ${filters.length > 0 ? '(filtered)' : 'loaded'}`}
           </span>
           {isFetchingMore && (
             <>
