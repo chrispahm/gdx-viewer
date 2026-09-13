@@ -4,6 +4,12 @@ All notable changes to the "gdx-viewer" extension will be documented in this fil
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.3.0] - 2026-09-13
+
+### Fixed
+- **Custom SQL query results now reach the grid**: running a query from the SQL toolbar replaced only the column headers while the rows stayed those of the full symbol table. Query columns and rows are now kept separate from the materialized table's metadata, so the grid shows the query's own rows. A banner and the status bar (`N rows (query result)`) make the mode visible; infinite paging, column filters and sorts are disabled while a query result is displayed, and the result is dropped when the symbol, filters or sorts change (#1)
+- **Filter search box now actually filters**: typing a value name into a column filter's search box and pressing Apply cleared the filter instead of applying it, because the search narrowed only the displayed list. With a search term entered, the bulk actions now act on the matches (Select/Invert/Deselect Matches), and Enter in the search box applies the matches immediately (#2)
+
 ## [0.1.0] - 2025-12-20
 
 ### Added
